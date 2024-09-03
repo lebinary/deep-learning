@@ -171,6 +171,11 @@ On the grader's system (Linux + GPU), the following command was used:
 pip install torch==2.3.1+cu118 torchvision==0.18.1+cu118 --index-url https://download.pytorch.org/whl/cu118
 ```
 
+For MAC user
+```bash
+pip install torch==2.3.1 torchvision==0.18.1
+```
+
 Then install additional dependencies for the homework:
 
 ```bash
