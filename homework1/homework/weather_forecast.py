@@ -21,7 +21,7 @@ class WeatherForecast:
             min_per_day: tensor of size (num_days,)
             max_per_day: tensor of size (num_days,)
         """
-        raise NotImplementedError
+        return (torch.min(self.data, dim=1).values, torch.max(self.data, dim=1).values)
 
     def find_the_largest_drop(self) -> torch.Tensor:
         """
@@ -31,7 +31,10 @@ class WeatherForecast:
         Returns:
             tensor of a single value, the difference in temperature
         """
-        raise NotImplementedError
+        daily_avg = torch.mean(self.data, dim=1)
+        temp_changes = daily_avg[1:] - daily_avg[:-1]
+        largest_drop = torch.min(temp_changes)
+        return largest_drop
 
     def find_the_most_extreme_day(self) -> torch.Tensor:
         """
@@ -40,7 +43,10 @@ class WeatherForecast:
         Returns:
             tensor with size (num_days,)
         """
-        raise NotImplementedError
+        daily_avg = torch.mean(self.data, dim=1)
+        temp_changes = torch.abs(self.data - daily_avg.unsqueeze(1))
+        idx = torch.max(temp_changes, dim=1).indices
+        return self.data[torch.arange(len(self.data)), idx]
 
     def max_last_k_days(self, k: int) -> torch.Tensor:
         """
@@ -49,7 +55,7 @@ class WeatherForecast:
         Returns:
             tensor of size (k,)
         """
-        raise NotImplementedError
+        return torch.max(self.data[-k:], dim=1).values
 
     def predict_temperature(self, k: int) -> torch.Tensor:
         """
@@ -62,7 +68,7 @@ class WeatherForecast:
         Returns:
             tensor of a single value, the predicted temperature
         """
-        raise NotImplementedError
+        return torch.mean(self.data[-k:])
 
     def what_day_is_this_from(self, t: torch.FloatTensor) -> torch.LongTensor:
         """
@@ -87,4 +93,4 @@ class WeatherForecast:
         Returns:
             tensor of a single value, the index of the closest data element
         """
-        raise NotImplementedError
+        return torch.argmin(torch.linalg.norm(self.data - t, dim=1, ord=1))
