@@ -91,3 +91,6 @@ pytest.ini
 
 # filesystem
 /uploads
+
+# data
+/homework2/classification_data
