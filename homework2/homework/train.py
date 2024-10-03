@@ -21,8 +21,10 @@ def train(
 ):
     if torch.cuda.is_available():
         device = torch.device("cuda")
+    elif torch.backends.mps.is_available() and torch.backends.mps.is_built():
+        device = torch.device("mps") # for Arm Macs
     else:
-        print("CUDA not available, using CPU")
+        print("GPU not available, using CPU")
         device = torch.device("cpu")
 
     # set random seed so each run is deterministic
@@ -126,7 +128,7 @@ if __name__ == "__main__":
     parser.add_argument("--seed", type=int, default=2024)
 
     # optional: additional model hyperparamters
-    # parser.add_argument("--num_layers", type=int, default=3)
+    # parser.add_argument("--num_layers", type=int, default=4)
 
     # pass all arguments to train
     train(**vars(parser.parse_args()))

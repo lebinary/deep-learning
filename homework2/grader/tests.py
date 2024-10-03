@@ -218,7 +218,13 @@ class LinearGrader(Grader):
         super().__init__(*args, **kwargs)
 
         self.data = list(load_data(DATA_SPLIT, num_workers=2))
-        self.device = torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu")
+        if torch.cuda.is_available():
+            self.device = torch.device("cuda")
+        elif torch.backends.mps.is_available() and torch.backends.mps.is_built():
+            self.device = torch.device("mps") # for Arm Macs
+        else:
+            print("GPU not available, using CPU")
+            self.device = torch.device("cpu")
 
     @torch.inference_mode()
     def accuracy(
