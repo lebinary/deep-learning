@@ -141,6 +141,9 @@ class MLPClassifierDeep(nn.Module):
                 nn.ReLU(),
             ])
             in_features = hidden_size
+            
+            # Pyramid structure: suggested by Claude to increase accuracy 
+            hidden_size = max(16, hidden_size // 2)
         
         self.mlp_deep = nn.Sequential(*layers, nn.Linear(hidden_size, num_classes))
 
