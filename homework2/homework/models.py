@@ -168,7 +168,9 @@ class MLPClassifierDeepResidual(nn.Module):
         self,
         h: int = 64,
         w: int = 64,
+        num_layers: int = 4,
         num_classes: int = 6,
+        hidden_size: int = 128
     ):
         """
         Args:
@@ -181,8 +183,24 @@ class MLPClassifierDeepResidual(nn.Module):
             num_layers: int, number of hidden layers
         """
         super().__init__()
+        # Calculate the total number of input features
+        input_features = 3 * h * w
 
-        raise NotImplementedError("MLPClassifierDeepResidual.__init__() is not implemented")
+        # Build the layers
+        self.input_layer = nn.Linear(input_features, hidden_size)
+
+        hidden_layers = []
+        in_features = hidden_size
+        for _ in range(num_layers):
+            hidden_layers.extend([
+                nn.Linear(in_features, hidden_size),
+                nn.LayerNorm(hidden_size),
+                nn.ReLU(),
+            ])
+            in_features = hidden_size
+        self.hidden_layers = nn.ModuleList(hidden_layers)
+        
+        self.output_layer = nn.Linear(hidden_size, num_classes)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
@@ -192,7 +210,29 @@ class MLPClassifierDeepResidual(nn.Module):
         Returns:
             tensor (b, num_classes) logits
         """
-        raise NotImplementedError("MLPClassifierDeepResidual.forward() is not implemented")
+        # Flatten the input tensor, x is now (b, 3 * H * W)
+        x = x.view(x.size(0), -1)
+        
+        # in: (b, 3 * H * W), out: (b, hidden_size)
+        x = self.input_layer(x)
+        
+        # Global residual (we need to ensure dimensions match)
+        global_res = x
+        
+        for i in range(0, len(self.hidden_layers) - 1, 3):
+            local_res = x
+            x = self.hidden_layers[i](x)   # Linear
+            x = self.hidden_layers[i+1](x) # LayerNorm
+            x = self.hidden_layers[i+2](x) # ReLU
+            x = x + local_res  # Local residual connection
+        
+        # Global residual connection (if dimensions match)
+        x = x + global_res
+        
+        # Final classification layer
+        x = self.output_layer(x)
+        
+        return x
 
 
 model_factory = {
