@@ -7,6 +7,20 @@ HOMEWORK_DIR = Path(__file__).resolve().parent
 INPUT_MEAN = [0.2788, 0.2657, 0.2629]
 INPUT_STD = [0.2064, 0.1944, 0.2252]
 
+class ClassificationLoss(nn.Module):
+    def forward(self, logits: torch.Tensor, target: torch.LongTensor) -> torch.Tensor:
+        """
+        Multi-class classification loss
+        Hint: simple one-liner
+
+        Args:
+            logits: tensor (b, c) logits, where c is the number of classes
+            target: tensor (b,) labels
+
+        Returns:
+            tensor, scalar loss
+        """
+        return nn.functional.cross_entropy(logits, target)
 
 class Classifier(nn.Module):
     def __init__(
@@ -26,8 +40,30 @@ class Classifier(nn.Module):
         self.register_buffer("input_mean", torch.as_tensor(INPUT_MEAN))
         self.register_buffer("input_std", torch.as_tensor(INPUT_STD))
 
-        # TODO: implement
-        pass
+
+        # CNN architecture
+        self.features = nn.Sequential(
+            nn.Conv2d(in_channels, 32, kernel_size=3, padding=1),
+            nn.ReLU(inplace=True),
+            nn.MaxPool2d(kernel_size=2, stride=2),
+            nn.Conv2d(32, 64, kernel_size=3, padding=1),
+            nn.ReLU(inplace=True),
+            nn.MaxPool2d(kernel_size=2, stride=2),
+            nn.Conv2d(64, 128, kernel_size=3, padding=1),
+            nn.ReLU(inplace=True),
+            nn.MaxPool2d(kernel_size=2, stride=2),
+        )
+
+        # Adaptive pooling to handle different input sizes
+        self.adaptive_pool = nn.AdaptiveAvgPool2d((1, 1))
+
+        # Fully connected layers
+        self.classifier = nn.Sequential(
+            nn.Linear(128, 256),
+            nn.ReLU(inplace=True),
+            nn.Dropout(0.5),
+            nn.Linear(256, num_classes)
+        )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
@@ -40,8 +76,15 @@ class Classifier(nn.Module):
         # optional: normalizes the input
         z = (x - self.input_mean[None, :, None, None]) / self.input_std[None, :, None, None]
 
-        # TODO: replace with actual forward pass
-        logits = torch.randn(x.size(0), 6)
+        # Convolutional layers
+        logits = self.features(z);
+        
+        # Adaptive pooling and flattening
+        features = self.adaptive_pool(features)
+        features = torch.flatten(features, 1)
+        
+        # Forward pass through fully connected layers
+        logits = self.classifier(features)
 
         return logits
 
