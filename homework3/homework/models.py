@@ -1,5 +1,7 @@
 from pathlib import Path
 
+import os
+import uuid
 import torch
 import torch.nn as nn
 
@@ -39,30 +41,31 @@ class Classifier(nn.Module):
 
         self.register_buffer("input_mean", torch.as_tensor(INPUT_MEAN))
         self.register_buffer("input_std", torch.as_tensor(INPUT_STD))
-
+        
+        # Input size = (3, H, W)
 
         # CNN architecture
         self.features = nn.Sequential(
-            nn.Conv2d(in_channels, 32, kernel_size=3, padding=1),
-            nn.ReLU(inplace=True),
-            nn.MaxPool2d(kernel_size=2, stride=2),
-            nn.Conv2d(32, 64, kernel_size=3, padding=1),
-            nn.ReLU(inplace=True),
-            nn.MaxPool2d(kernel_size=2, stride=2),
-            nn.Conv2d(64, 128, kernel_size=3, padding=1),
-            nn.ReLU(inplace=True),
-            nn.MaxPool2d(kernel_size=2, stride=2),
+            nn.Conv2d(in_channels, 32, kernel_size=3, padding=1), # -> (32, H, W)
+            nn.GELU(),
+            nn.MaxPool2d(kernel_size=2, stride=2),  #  -> (32, H/2, W/2)
+            nn.Conv2d(32, 64, kernel_size=3, padding=1), #  -> (64, H/2, W/2)
+            nn.GELU(),
+            nn.MaxPool2d(kernel_size=2, stride=2), # -> (64, H/4, W/4)
+            nn.Conv2d(64, 128, kernel_size=3, padding=1), # -> (128, H/4, W/4)
+            nn.GELU(),
+            nn.MaxPool2d(kernel_size=2, stride=2), # -> (128, H/4, W/4)
         )
 
         # Adaptive pooling to handle different input sizes
-        self.adaptive_pool = nn.AdaptiveAvgPool2d((1, 1))
+        self.adaptive_pool = nn.AdaptiveAvgPool2d((1, 1)) # -> (128, 1, 1) -> flatten (1, 128)
 
         # Fully connected layers
         self.classifier = nn.Sequential(
-            nn.Linear(128, 256),
-            nn.ReLU(inplace=True),
+            nn.Linear(128, 256), # -> (1, 256)
+            nn.ReLU(),
             nn.Dropout(0.5),
-            nn.Linear(256, num_classes)
+            nn.Linear(256, num_classes) # -> (1, num_classes) 
         )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -77,7 +80,7 @@ class Classifier(nn.Module):
         z = (x - self.input_mean[None, :, None, None]) / self.input_std[None, :, None, None]
 
         # Convolutional layers
-        logits = self.features(z);
+        features = self.features(z);
         
         # Adaptive pooling and flattening
         features = self.adaptive_pool(features)
@@ -204,7 +207,7 @@ def load_model(
     return m
 
 
-def save_model(model: torch.nn.Module) -> str:
+def save_model(model: torch.nn.Module, accuracy: float = None) -> str:
     """
     Use this function to save your model in train.py
     """
@@ -217,9 +220,20 @@ def save_model(model: torch.nn.Module) -> str:
     if model_name is None:
         raise ValueError(f"Model type '{str(type(model))}' not supported")
 
+    # save record in model directory
+    if accuracy:
+        # Create model directory if it doesn't exist
+        model_dir = HOMEWORK_DIR / model_name
+        os.makedirs(model_dir, exist_ok=True)
+
+        unique_id = str(uuid.uuid4())[:8]
+        output_path = model_dir / f"{model_name}_{accuracy:.2f}_{unique_id}.th"
+        torch.save(model.state_dict(), output_path)
+    
+    # overwrite one in main directory for grading
     output_path = HOMEWORK_DIR / f"{model_name}.th"
     torch.save(model.state_dict(), output_path)
-
+    
     return output_path
 
 

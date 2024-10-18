@@ -48,11 +48,11 @@ def train(
     # Sample subsets based on percentages
     train_dataset = create_subset(full_train_data.dataset, sample_percent)
     train_data = torch.utils.data.DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
-    print(f"Training on {len(train_dataset)} samples ({sample_percent}% of full dataset)")
+    print(f"Training on {len(train_dataset)} samples ({sample_percent * 100}% of full dataset)")
     
     val_dataset = create_subset(full_val_data.dataset, sample_percent)
     val_data = torch.utils.data.DataLoader(val_dataset, batch_size=batch_size, shuffle=False)
-    print(f"Validating on {len(val_dataset)} samples ({sample_percent}% of full dataset)")
+    print(f"Validating on {len(val_dataset)} samples ({sample_percent * 100}% of full dataset)")
 
     # create loss function and optimizer
     loss_func = ClassificationLoss()
@@ -121,7 +121,7 @@ def train(
             )
 
     # save and overwrite the model in the root directory for grading
-    save_model(model)
+    save_model(model, metrics["val_acc"][-1])
 
     # save a copy of model weights in the log directory
     torch.save(model.state_dict(), log_dir / f"{model_name}.th")
@@ -139,7 +139,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
 
     parser.add_argument("--exp_dir", type=str, default="logs")
-    parser.add_argument("--model_name", type=str, required=True)
+    parser.add_argument("--model_name", type=str, default="classifier")
     parser.add_argument("--num_epoch", type=int, default=50)
     parser.add_argument("--lr", type=float, default=1e-3)
     parser.add_argument("--seed", type=int, default=2024)
