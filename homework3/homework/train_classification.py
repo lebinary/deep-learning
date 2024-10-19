@@ -121,7 +121,7 @@ def train(
             )
 
     # save and overwrite the model in the root directory for grading
-    save_model(model, metrics["val_acc"][-1])
+    save_model(model, epoch_val_acc)
 
     # save a copy of model weights in the log directory
     torch.save(model.state_dict(), log_dir / f"{model_name}.th")

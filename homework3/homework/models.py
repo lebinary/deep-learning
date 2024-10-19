@@ -4,10 +4,27 @@ import os
 import uuid
 import torch
 import torch.nn as nn
+import math
 
 HOMEWORK_DIR = Path(__file__).resolve().parent
 INPUT_MEAN = [0.2788, 0.2657, 0.2629]
 INPUT_STD = [0.2064, 0.1944, 0.2252]
+
+class ResidualCNNBlock(nn.Module):
+    def __init__(self, in_channels, out_channels, cnn_block: nn.Sequential, stride=1):
+        super(ResidualCNNBlock, self).__init__()
+        self.cnn_block = cnn_block
+        
+        if in_channels != out_channels or stride != 1:
+            self.shortcut = self.shortcut = nn.Conv2d(in_channels, out_channels, kernel_size=1, stride=stride)
+        else:
+            self.shortcut = nn.Identity()
+        
+    def forward(self, x):
+        residual = self.shortcut(x)
+        out = self.cnn_block(x)
+        out += residual
+        return out
 
 class ClassificationLoss(nn.Module):
     def forward(self, logits: torch.Tensor, target: torch.LongTensor) -> torch.Tensor:
@@ -43,24 +60,49 @@ class Classifier(nn.Module):
         self.register_buffer("input_std", torch.as_tensor(INPUT_STD))
         
         # Input size = (3, H, W)
-
-        # CNN architecture
-        self.features = nn.Sequential(
-            nn.Conv2d(in_channels, 32, kernel_size=3, padding=1), # -> (32, H, W)
+        
+        # Expand input
+        in_cnn, out_cnn = in_channels, 64
+        self.expand_block = nn.Conv2d(in_cnn, out_cnn, kernel_size=7, padding=3, stride=2) # -> (64, H/2, W/2)
+        
+        # Build CNN residual blocks
+        in_cnn, out_cnn = out_cnn, 32
+        first_cnn_block = ResidualCNNBlock(in_cnn, out_cnn, nn.Sequential(
+            nn.Conv2d(in_cnn, out_cnn, kernel_size=3, padding=1), # -> (32, H/2, W/2)
+            nn.BatchNorm2d(out_cnn),
             nn.GELU(),
-            nn.MaxPool2d(kernel_size=2, stride=2),  #  -> (32, H/2, W/2)
-            nn.Conv2d(32, 64, kernel_size=3, padding=1), #  -> (64, H/2, W/2)
+            nn.Dropout2d(0.1)
+        ))
+        
+        in_cnn, out_cnn = out_cnn, 64
+        second_cnn_block = ResidualCNNBlock(in_cnn, out_cnn, nn.Sequential(
+            nn.Conv2d(in_cnn, out_cnn, kernel_size=3, padding=1), #  -> (64, H/2, W/2)
+            nn.BatchNorm2d(out_cnn),
             nn.GELU(),
-            nn.MaxPool2d(kernel_size=2, stride=2), # -> (64, H/4, W/4)
-            nn.Conv2d(64, 128, kernel_size=3, padding=1), # -> (128, H/4, W/4)
+            nn.Dropout2d(0.1)
+        ))
+        
+        in_cnn, out_cnn = out_cnn, 128
+        third_cnn_block = ResidualCNNBlock(in_cnn, out_cnn, nn.Sequential(
+            nn.Conv2d(in_cnn, out_cnn, kernel_size=3, padding=1), #  -> (128, H/2, W/2)
+            nn.BatchNorm2d(out_cnn),
             nn.GELU(),
-            nn.MaxPool2d(kernel_size=2, stride=2), # -> (128, H/4, W/4)
+            nn.Dropout2d(0.1)
+        ))
+        
+        self.cnn = nn.Sequential(
+            first_cnn_block,
+            second_cnn_block,
+            third_cnn_block,
         )
-
+        
+        # Global residual connection, connect expanded block to CNN output
+        self.cnn_shortcut = nn.Conv2d(64, 128, kernel_size=1)
+        
         # Adaptive pooling to handle different input sizes
         self.adaptive_pool = nn.AdaptiveAvgPool2d((1, 1)) # -> (128, 1, 1) -> flatten (1, 128)
-
-        # Fully connected layers
+        
+        # Build classification blocks
         self.classifier = nn.Sequential(
             nn.Linear(128, 256), # -> (1, 256)
             nn.ReLU(),
@@ -78,16 +120,25 @@ class Classifier(nn.Module):
         """
         # optional: normalizes the input
         z = (x - self.input_mean[None, :, None, None]) / self.input_std[None, :, None, None]
+        
+        # Expand input
+        expanded_z = self.expand_block(z)
 
-        # Convolutional layers
-        features = self.features(z);
+        # Global residual connection
+        cnn_residual = self.cnn_shortcut(expanded_z)
         
+        # Main CNN path
+        out = self.cnn(expanded_z)
+        
+        # Add global residual
+        out += cnn_residual
+
         # Adaptive pooling and flattening
-        features = self.adaptive_pool(features)
-        features = torch.flatten(features, 1)
+        out = self.adaptive_pool(out)
+        out = torch.flatten(out, 1)
         
-        # Forward pass through fully connected layers
-        logits = self.classifier(features)
+        # Classification
+        logits = self.classifier(out)
 
         return logits
 
