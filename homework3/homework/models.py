@@ -40,6 +40,20 @@ class ClassificationLoss(nn.Module):
             tensor, scalar loss
         """
         return nn.functional.cross_entropy(logits, target)
+    
+class RegressionLoss(nn.Module):
+    def forward(self, pred: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
+        """
+        Mean squared error loss for depth prediction
+
+        Args:
+            pred: tensor (b, 1, h, w) predicted depth values
+            target: tensor (b, h, w) ground truth depth values
+
+        Returns:
+            tensor, scalar loss
+        """
+        return nn.functional.mse_loss(pred.squeeze(1), target)
 
 class Classifier(nn.Module):
     def __init__(

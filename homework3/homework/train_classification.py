@@ -6,6 +6,8 @@ import numpy as np
 import torch
 import torch.utils.tensorboard as tb
 
+from homework.utils import create_subset
+
 from .models import ClassificationLoss, load_model, save_model
 from .datasets.classification_dataset import load_data
 
@@ -126,14 +128,6 @@ def train(
     # save a copy of model weights in the log directory
     torch.save(model.state_dict(), log_dir / f"{model_name}.th")
     print(f"Model saved to {log_dir / f'{model_name}.th'}")
-
-# Function to create subset based on percentage
-def create_subset(dataset, percent):
-    if percent <= 0 or percent > 1:
-        raise ValueError("Percentage must be between 0 and 1")
-    num_samples = int(len(dataset) * percent)
-    indices = torch.randperm(len(dataset))[:num_samples]
-    return torch.utils.data.Subset(dataset, indices)
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
