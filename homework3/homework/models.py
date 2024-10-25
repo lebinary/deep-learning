@@ -11,12 +11,15 @@ INPUT_MEAN = [0.2788, 0.2657, 0.2629]
 INPUT_STD = [0.2064, 0.1944, 0.2252]
 
 class ResidualCNNBlock(nn.Module):
-    def __init__(self, in_channels, out_channels, cnn_block: nn.Sequential, stride=1):
+    def __init__(self, in_channels, out_channels, cnn_block: nn.Sequential, stride=1, up_sampling=False):
         super(ResidualCNNBlock, self).__init__()
         self.cnn_block = cnn_block
         
         if in_channels != out_channels or stride != 1:
-            self.shortcut = self.shortcut = nn.Conv2d(in_channels, out_channels, kernel_size=1, stride=stride)
+            if up_sampling:
+                self.shortcut = nn.ConvTranspose2d(in_channels, out_channels, kernel_size=1, stride=stride, output_padding=1)
+            else:
+                self.shortcut = nn.Conv2d(in_channels, out_channels, kernel_size=1, stride=stride)
         else:
             self.shortcut = nn.Identity()
         
@@ -188,9 +191,67 @@ class Detector(torch.nn.Module):
 
         self.register_buffer("input_mean", torch.as_tensor(INPUT_MEAN))
         self.register_buffer("input_std", torch.as_tensor(INPUT_STD))
+        
+        # Input size = (3, H, W)
+        
+        # ENCODER:
+        in_dim, out_dim = in_channels, 16
+        self.encoder_block1 = ResidualCNNBlock(in_dim, out_dim, nn.Sequential(
+            nn.Conv2d(in_dim, out_dim, kernel_size=3, stride=2, padding=1), # -> (16, H/2, W/2)
+            nn.BatchNorm2d(out_dim),
+            nn.GELU(),
+            nn.Dropout2d(0.1)
+        ), stride=2)
+        
+        in_dim, out_dim = out_dim, 32
+        self.encoder_block2 = ResidualCNNBlock(in_dim, out_dim, nn.Sequential(
+            nn.Conv2d(in_dim, out_dim, kernel_size=3, stride=2, padding=1), #  -> (32, H/4, W/4)
+            nn.BatchNorm2d(out_dim),
+            nn.GELU(),
+            nn.Dropout2d(0.1)
+        ), stride=2)
 
-        # TODO: implement
-        pass
+        in_dim, out_dim = out_dim, 64
+        self.encoder_block3 = ResidualCNNBlock(in_dim, out_dim, nn.Sequential(
+            nn.Conv2d(in_dim, out_dim, kernel_size=3, stride=2, padding=1), #  -> (64, H/8, W/8)
+            nn.BatchNorm2d(out_dim),
+            nn.GELU(),
+            nn.Dropout2d(0.1)
+        ), stride=2)
+        
+        # DECODER:
+        in_dim, out_dim = out_dim, 32
+        self.decoder_block1 = ResidualCNNBlock(in_dim, out_dim, nn.Sequential(
+            nn.ConvTranspose2d(in_dim, out_dim, kernel_size=3, stride=2, padding=1, output_padding=1), # -> (32, H/4, W/4)
+            nn.BatchNorm2d(out_dim),
+            nn.GELU(),
+            nn.Dropout2d(0.1)
+        ), stride=2, up_sampling=True)
+        
+        in_dim, out_dim = out_dim, 16
+        self.decoder_block2 = ResidualCNNBlock(in_dim, out_dim, nn.Sequential(
+            nn.ConvTranspose2d(in_dim, out_dim, kernel_size=3, stride=2, padding=1, output_padding=1), #  -> (16, H/2, W/2)
+            nn.BatchNorm2d(out_dim),
+            nn.GELU(),
+            nn.Dropout2d(0.1)
+        ), stride=2, up_sampling=True)
+        
+        in_dim, out_dim = out_dim, 16
+        self.decocder_block3 = ResidualCNNBlock(in_dim, out_dim, nn.Sequential(
+            nn.ConvTranspose2d(in_dim, out_dim, kernel_size=3, stride=2, padding=1, output_padding=1), #  -> (16, H, W)
+            nn.BatchNorm2d(out_dim),
+            nn.GELU(),
+            nn.Dropout2d(0.1)
+        ), stride=2, up_sampling=True) 
+        
+        # FINAL LAYERS
+        self.seg_decoder = nn.Sequential(
+            nn.Conv2d(out_dim, num_classes, kernel_size=3, padding=1), # -> (num_classes, H, W)
+        )
+        self.depth_decoder = nn.Sequential(
+            nn.Conv2d(out_dim, 1, kernel_size=3, padding=1), # -> (1, H, W)
+            nn.Sigmoid()
+        )
 
     def forward(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         """
@@ -205,12 +266,23 @@ class Detector(torch.nn.Module):
                 - logits (b, num_classes, h, w)
                 - depth (b, h, w)
         """
-        # optional: normalizes the input
+        # Normalize input
         z = (x - self.input_mean[None, :, None, None]) / self.input_std[None, :, None, None]
+        
+        # Shared encoder - decoder
+        enc1 = self.encoder_block1(z)       # (16, H/2, W/2)
+        enc2 = self.encoder_block2(enc1)    # (32, H/4, W/4)
+        enc3 = self.encoder_block3(enc2)    # (64, H//8, H/8)
+        
+        dec1 = self.decoder_block1(enc3)    # (32, H/4. H/4)
+        dec1 = dec1 + enc2                  # residual
+        dec2 = self.decoder_block2(dec1)    # (16. H/2, H/2)
+        dec2 = dec2 + enc1                  # residual
+        dec3 = self.decocder_block3(dec2)   # (16, H, W)
 
-        # TODO: replace with actual forward pass
-        logits = torch.randn(x.size(0), 3, x.size(2), x.size(3))
-        raw_depth = torch.rand(x.size(0), x.size(2), x.size(3))
+        # Decoder branches
+        logits = self.seg_decoder(dec3)
+        raw_depth = self.depth_decoder(dec3).squeeze(1)
 
         return logits, raw_depth
 
@@ -272,7 +344,7 @@ def load_model(
     return m
 
 
-def save_model(model: torch.nn.Module, accuracy: float = None) -> str:
+def save_model(model: torch.nn.Module, identifier: str = None) -> str:
     """
     Use this function to save your model in train.py
     """
@@ -286,13 +358,13 @@ def save_model(model: torch.nn.Module, accuracy: float = None) -> str:
         raise ValueError(f"Model type '{str(type(model))}' not supported")
 
     # save record in model directory
-    if accuracy:
+    if identifier:
         # Create model directory if it doesn't exist
         model_dir = HOMEWORK_DIR / model_name
         os.makedirs(model_dir, exist_ok=True)
 
         unique_id = str(uuid.uuid4())[:8]
-        output_path = model_dir / f"{model_name}_{accuracy:.2f}_{unique_id}.th"
+        output_path = model_dir / f"{model_name}_{identifier}_{unique_id}.th"
         torch.save(model.state_dict(), output_path)
     
     # overwrite one in main directory for grading

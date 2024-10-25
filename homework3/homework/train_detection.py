@@ -58,7 +58,6 @@ def train(
     val_dataset = create_subset(full_val_data.dataset, sample_percent)
     val_data = torch.utils.data.DataLoader(val_dataset, batch_size=batch_size, shuffle=False)
     print(f"Validating on {len(val_dataset)} samples ({sample_percent * 100}% of full dataset)")
-    dataloader_stats(train_data)
 
     # create loss function and optimizer
     seg_loss_fn = ClassificationLoss()
@@ -81,8 +80,8 @@ def train(
 
         # TRAINING
         model.train()
-        for img, track, depth in train_data:
-            img, track, depth = img.to(device), track.to(device), depth.to(device)
+        for batch in train_data:
+            img, track, depth = batch['image'].to(device), batch['track'].to(device), batch['depth'].to(device)
 
             # Forward pass
             logits, raw_depth = model(img)
@@ -101,19 +100,13 @@ def train(
             with torch.no_grad():
                 pred = logits.argmax(1)
                 train_metrics.add(pred, track, raw_depth, depth)
-            
-            # Log training loss
-            logger.add_scalar('Loss/train_seg', seg_loss.item(), global_step)
-            logger.add_scalar('Loss/train_depth', depth_loss.item(), global_step)
-            logger.add_scalar('Loss/train_total', total_loss.item(), global_step)
-            global_step += 1
 
         # VALIDATION
         model.eval()
         with torch.inference_mode():
 
-            for img, track, depth in val_data:
-                img, track, depth = img.to(device), track.to(device), depth.to(device)
+            for batch in val_data:
+                img, track, depth = batch['image'].to(device), batch['track'].to(device), batch['depth'].to(device)
                 
                 pred, pred_depth = model.predict(img)
 
@@ -125,11 +118,10 @@ def train(
         val_results = val_metrics.compute()
 
         # Log to tensorboard
-        # TODO: Organize tensor board properly
         for key, value in train_results.items():
-            logger.add_scalar(f'train/{key}', value, epoch)
+            logger.add_scalar(f'Train/{key}', value, epoch)
         for key, value in val_results.items():
-            logger.add_scalar(f'val/{key}', value, epoch)
+            logger.add_scalar(f'Val/{key}', value, epoch)
 
         # print on first, last, every 10th epoch
         if epoch == 0 or epoch == num_epoch - 1 or (epoch + 1) % 10 == 0:
@@ -142,11 +134,12 @@ def train(
             )
 
     # save and overwrite the model in the root directory for grading
-    # save_model(model, epoch_val_acc)
+    timestamp = datetime.now().strftime('%Y%m%d_%H%M') 
+    save_model(model, timestamp)
 
     # save a copy of model weights in the log directory
-    # torch.save(model.state_dict(), log_dir / f"{model_name}.th")
-    # print(f"Model saved to {log_dir / f'{model_name}.th'}")
+    torch.save(model.state_dict(), log_dir / f"{model_name}.th")
+    print(f"Model saved to {log_dir / f'{model_name}.th'}")
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
