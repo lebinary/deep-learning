@@ -336,10 +336,17 @@ class ASPP(nn.Module):
     def __init__(self, in_channels, out_channels):
         super().__init__()
         # Atrous Spatial Pyramid Pooling
+        
+        # Input size: (128, H/16, H/16)
+        # Output size: (128, H/16, H/16) 
+        
+        # Use different dilation rates to capture local contexts
         self.conv1 = nn.Conv2d(in_channels, out_channels, 1)
-        self.conv2 = nn.Conv2d(in_channels, out_channels, 3, padding=6, dilation=6)
+        self.conv2 = nn.Conv2d(in_channels, out_channels, 3, padding=6, dilation=6) 
         self.conv3 = nn.Conv2d(in_channels, out_channels, 3, padding=12, dilation=12)
         self.conv4 = nn.Conv2d(in_channels, out_channels, 3, padding=18, dilation=18)
+        
+        # Average pooling to reduce spatial dims, then upsample back to capture global context 
         self.pool = nn.AdaptiveAvgPool2d(1)
         self.conv5 = nn.Conv2d(in_channels, out_channels, 1)
         
