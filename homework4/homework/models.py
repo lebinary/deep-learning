@@ -8,6 +8,23 @@ INPUT_MEAN = [0.2788, 0.2657, 0.2629]
 INPUT_STD = [0.2064, 0.1944, 0.2252]
 
 
+class WaypointLoss(nn.Module):
+    def forward(self, pred: torch.Tensor, target: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
+        """
+        Mean squared error loss for waypoint prediction
+
+        Args:
+            pred: tensor (B, n_waypoints, 2) predicted future positions
+            target: tensor (B, n_waypoints, 2) ground truth future positions
+            mask: tensor (B, n_waypoints) boolean mask for valid waypoints
+
+        Returns:
+            tensor, scalar loss
+        """
+        # Apply mask to only consider valid waypoints
+        mask = mask.unsqueeze(-1)  # (B, n_waypoints, 1) to broadcast across coordinates
+        return nn.functional.mse_loss(pred * mask, target * mask)
+
 class MLPPlanner(nn.Module):
     def __init__(
         self,
@@ -44,6 +61,26 @@ class MLPPlanner(nn.Module):
             torch.Tensor: future waypoints with shape (b, n_waypoints, 2)
         """
         raise NotImplementedError
+
+   
+    def predict(
+        self,         
+        track_left: torch.Tensor,
+        track_right: torch.Tensor
+    ) -> torch.Tensor:
+        """
+        Used for inference, predicts waypoints from the left and right boundaries of the track.
+
+        Args:
+            track_left (torch.Tensor): shape (b, n_track, 2)
+            track_right (torch.Tensor): shape (b, n_track, 2)
+
+        Returns:
+            torch.Tensor: future waypoints with shape (b, n_waypoints, 2)
+        """
+        pred_waypoints = self(track_left, track_right)
+
+        return pred_waypoints 
 
 
 class TransformerPlanner(nn.Module):

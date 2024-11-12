@@ -7,9 +7,10 @@ import torch
 import torch.utils.tensorboard as tb
 
 from grader.metrics import DetectionMetric
+from homework.metrics import PlannerMetric
 from homework.utils import create_subset
 
-from .models import ClassificationLoss, RegressionLoss, load_model, save_model
+from .models import ClassificationLoss, RegressionLoss, WaypointLoss, load_model, save_model
 from .datasets.road_dataset import load_data
 
 
@@ -64,8 +65,7 @@ def train(
     print(f"Validating on {len(val_dataset)} samples ({sample_percent * 100}% of full dataset)")
 
     # create loss function and optimizer
-    seg_loss_fn = ClassificationLoss()
-    depth_loss_fn = RegressionLoss()
+    waypoint_loss_fn = WaypointLoss()
     
     # Optimizer
     optimizer = torch.optim.Adam(model.parameters(), lr=lr)
@@ -73,8 +73,8 @@ def train(
     global_step = 0
 
     # Setup metrics for both training and validation
-    train_metrics = DetectionMetric(num_classes=3)
-    val_metrics = DetectionMetric(num_classes=3)
+    train_metrics = PlannerMetric()
+    val_metrics = PlannerMetric()
 
     # training loop
     for epoch in range(num_epoch):
@@ -85,37 +85,36 @@ def train(
         # TRAINING
         model.train()
         for batch in train_data:
-            img, track, depth = batch['image'].to(device), batch['track'].to(device), batch['depth'].to(device)
-
+            track_left, track_right = batch['image'].to(device), batch['track'].to(device)
+            waypoints, waypoints_mask = batch['waypoints'].to(device), batch['waypoints_mask'].to(device)
+            
             # Forward pass
-            logits, raw_depth = model(img)
+            pred_waypoints = model(track_left, track_right)
 
             # Compute losses
-            seg_loss = seg_loss_fn(logits, track)
-            depth_loss = depth_loss_fn(raw_depth, depth)
-            total_loss = (seg_weight * seg_loss) + (depth_weight * depth_loss)
+            waypoint_loss = waypoint_loss_fn(pred_waypoints, waypoints, waypoints_mask)
             
             # Backward pass and optimization
             optimizer.zero_grad()
-            total_loss.backward()
+            waypoint_loss.backward()
             optimizer.step()
             
             # Update metrics (after converting logits to predictions)
             with torch.no_grad():
-                pred = logits.argmax(1)
-                train_metrics.add(pred, track, raw_depth, depth)
+                train_metrics.add(pred_waypoints, waypoints, waypoints_mask)
 
         # VALIDATION
         model.eval()
         with torch.inference_mode():
 
             for batch in val_data:
-                img, track, depth = batch['image'].to(device), batch['track'].to(device), batch['depth'].to(device)
+                track_left, track_right = batch['image'].to(device), batch['track'].to(device)
+                waypoints, waypoints_mask = batch['waypoints'].to(device), batch['waypoints_mask'].to(device)
                 
-                pred, pred_depth = model.predict(img)
+                pred_waypoints = model.predict(img)
 
                 # Update metrics with predictions
-                val_metrics.add(pred, track, pred_depth, depth)
+                val_metrics.add(pred_waypoints, waypoints, waypoints_mask)
 
         # log average train and val accuracy to tensorboard
         train_results = train_metrics.compute()
@@ -131,10 +130,10 @@ def train(
         if epoch == 0 or epoch == num_epoch - 1 or (epoch + 1) % 10 == 0:
             print(
                 f"Epoch {epoch + 1:2d}/{num_epoch:2d}: "
-                f"val_iou={val_results['iou']:.4f} "
-                f"val_acc={val_results['accuracy']:.4f} "
-                f"val_depth={val_results['abs_depth_error']:.4f} "
-                f"val_tp_depth={val_results['tp_depth_error']:.4f}"
+                f"l1_error={val_results['l1_error']:.4f} "
+                f"longitudinal_error={val_results['longitudinal_error']:.4f} "
+                f"lateral_error={val_results['lateral_error']:.4f} "
+                f"num_samples={val_results['num_samples']:.4f}"
             )
 
     # save and overwrite the model in the root directory for grading
