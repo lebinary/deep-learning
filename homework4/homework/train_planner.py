@@ -6,11 +6,10 @@ import numpy as np
 import torch
 import torch.utils.tensorboard as tb
 
-from grader.metrics import DetectionMetric
 from homework.metrics import PlannerMetric
 from homework.utils import create_subset
 
-from .models import ClassificationLoss, RegressionLoss, WaypointLoss, load_model, save_model
+from .models import WaypointLoss, load_model, save_model
 from .datasets.road_dataset import load_data
 
 
@@ -20,7 +19,7 @@ Usage:
 """
 def train(
     exp_dir: str = "logs",
-    model_name: str = "linear_planner",
+    model_name: str = "mlp_planner",
     transform_pipeline: str = "state_only",
     num_workers=4,
     num_epoch: int = 50,
@@ -85,11 +84,11 @@ def train(
         # TRAINING
         model.train()
         for batch in train_data:
-            track_left, track_right = batch['image'].to(device), batch['track'].to(device)
+            track_left, track_right = batch['track_left'].to(device), batch['track_right'].to(device)
             waypoints, waypoints_mask = batch['waypoints'].to(device), batch['waypoints_mask'].to(device)
             
             # Forward pass
-            pred_waypoints = model(track_left, track_right)
+            pred_waypoints = model(track_left=track_left, track_right=track_right)
 
             # Compute losses
             waypoint_loss = waypoint_loss_fn(pred_waypoints, waypoints, waypoints_mask)
@@ -108,10 +107,10 @@ def train(
         with torch.inference_mode():
 
             for batch in val_data:
-                track_left, track_right = batch['image'].to(device), batch['track'].to(device)
+                track_left, track_right = batch['track_left'].to(device), batch['track_right'].to(device)
                 waypoints, waypoints_mask = batch['waypoints'].to(device), batch['waypoints_mask'].to(device)
                 
-                pred_waypoints = model.predict(img)
+                pred_waypoints = model.predict(track_left=track_left, track_right=track_right)
 
                 # Update metrics with predictions
                 val_metrics.add(pred_waypoints, waypoints, waypoints_mask)
@@ -148,7 +147,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
 
     parser.add_argument("--exp_dir", type=str, default="logs")
-    parser.add_argument("--model_name", type=str, default="linear_planner")
+    parser.add_argument("--model_name", type=str, default="mlp_planner")
     parser.add_argument("--transform_pipeline", type=str, default="state_only")
     parser.add_argument("--num_workers", type=int, default=4)
     parser.add_argument("--num_epoch", type=int, default=50)
