@@ -4,28 +4,11 @@ import uuid
 import torch
 import torch.nn as nn
 
+from homework.blocks import BottleneckResidualBlock, EncoderBlock, PredictionHead
+
 HOMEWORK_DIR = Path(__file__).resolve().parent
 INPUT_MEAN = [0.2788, 0.2657, 0.2629]
 INPUT_STD = [0.2064, 0.1944, 0.2252]
-
-
-class ResidualBlock(nn.Module):
-    def __init__(self, hidden_size: int, dropout_rate: float = 0.1):
-        super().__init__()
-        self.block = nn.Sequential(
-            nn.Linear(hidden_size, hidden_size),
-            nn.LayerNorm(hidden_size),
-            nn.GELU(),
-            nn.Dropout(dropout_rate),
-            nn.Linear(hidden_size, hidden_size),
-            nn.LayerNorm(hidden_size),
-            nn.Dropout(dropout_rate),
-        )
-
-        self.activation = nn.GELU()
-
-    def forward(self, x):
-        return self.activation(x + self.block(x))
 
 
 class WaypointLoss(nn.Module):
@@ -58,7 +41,8 @@ class MLPPlanner(nn.Module):
         num_residual_blocks: int = 3,
         num_endcoder_layers: int = 3,
         hidden_size: int = 512,
-        dropout_rate: float = 0.2,
+        prediction_size: int = 128,
+        dropout_rate: float = 0.1,
     ):
         """
         Args:
@@ -76,7 +60,6 @@ class MLPPlanner(nn.Module):
         # Input projection layer: (B, 40) -> (B, 512)
         in_dim, out_dim = input_features, hidden_size
         self.projection = nn.Sequential(
-            nn.BatchNorm1d(input_features),
             nn.Linear(in_dim, out_dim),
             nn.LayerNorm(out_dim),
             nn.GELU(),
@@ -85,34 +68,37 @@ class MLPPlanner(nn.Module):
         # ResNet: (B, 512) -> (B, 512)
         in_dim = out_dim
         blocks = [
-            ResidualBlock(hidden_size=in_dim, dropout_rate=dropout_rate)
+            BottleneckResidualBlock(
+                hidden_size=in_dim,
+                bottleneck_size=hidden_size // 2,
+                dropout_rate=dropout_rate,
+            )
             for _ in range(num_residual_blocks)
         ]
         self.resnet = nn.Sequential(*blocks)
 
         # Encoder to reducing the dimension: (B, 512) -> (B, 64)
-        layers = []
+        encoder_blocks = []
         for _ in range(num_endcoder_layers):
-            in_dim, out_dim = out_dim, max(32, out_dim // 2)
-            layers.extend(
-                [
-                    nn.Linear(in_dim, out_dim),
-                    nn.LayerNorm(out_dim),
-                    nn.ReLU(),
-                    nn.Dropout(dropout_rate),
-                ]
+            in_dim, out_dim = out_dim, max(64, out_dim // 2)
+            encoder_blocks.append(
+                EncoderBlock(in_dim=in_dim, out_dim=out_dim, dropout_rate=dropout_rate)
             )
-        self.encoder = nn.Sequential(*layers)
+        self.encoder = nn.Sequential(*encoder_blocks)
+
+        # Shared feature extraction: (B, 64) -> (B, 128)
+        in_dim, out_dim = out_dim, prediction_size
+        self.shared_features = nn.Sequential(
+            nn.Linear(in_dim, out_dim),
+            nn.LayerNorm(out_dim),
+            nn.GELU(),
+            nn.Dropout(dropout_rate),
+        )
 
         # Separate prediction heads: (B, 64) -> (B, waypoints)
         in_dim, out_dim = out_dim, n_waypoints
-        self.longitudinal_head = nn.Sequential(
-            nn.Linear(in_dim, 32), nn.GELU(), nn.Linear(32, out_dim)
-        )
-
-        self.lateral_head = nn.Sequential(
-            nn.Linear(in_dim, 32), nn.GELU(), nn.Linear(32, out_dim)
-        )
+        self.longitudinal_head = PredictionHead(in_dim, out_dim)
+        self.lateral_head = PredictionHead(in_dim, out_dim)
 
     def forward(
         self,
@@ -144,8 +130,11 @@ class MLPPlanner(nn.Module):
         left_flat = left_normalized.view(left_normalized.size(0), -1)
         right_flat = right_normalized.view(right_normalized.size(0), -1)
 
-        # Concat flatten tracks, (B, 20) + (B, 20) + (B, 20) -> (B, 60)
-        x = torch.concat([left_flat, right_flat], dim=1)
+        # Concat flatten tracks, (B, 20) + (B, 20) + (B, 26) -> (B, 60)
+        x = torch.concat(
+            [left_flat, right_flat],
+            dim=1,
+        )
 
         # Projection
         x = self.projection(x)
@@ -158,12 +147,58 @@ class MLPPlanner(nn.Module):
         # Encoder
         x = self.encoder(x)
 
-        # Longtitude
+        # Shared features
+        x = self.shared_features(x)
+
+        # Results
         y_longtitude = self.longitudinal_head(x)
         y_latitude = self.lateral_head(x)
         y = torch.stack([y_longtitude, y_latitude], dim=-1)
 
         return y
+
+    def _extract_geometric_features(self, track_center):
+        """
+        Extract geometric features from track centerline points.
+
+        Args:
+            track_center: Tensor of shape (B, 10, 2) containing track centerline points
+                where B is batch size
+
+        Returns:
+            Tensor of shape (B, 34) containing concatenated direction and curvature features
+        """
+        # Calculate track directions (vectors between consecutive points)
+        track_directions = track_center[:, 1:] - track_center[:, :-1]  # (B, 9, 2)
+
+        # Calculate curvature using three consecutive points
+        curvature = torch.zeros(
+            track_center.shape[0],
+            8,
+            dtype=track_center.dtype,
+            device=track_center.device,
+        )
+
+        # Get consecutive point triplets
+        p1 = track_center[:, :-2]  # (B, 8, 2)
+        p2 = track_center[:, 1:-1]  # (B, 8, 2)
+        p3 = track_center[:, 2:]  # (B, 8, 2)
+
+        # Calculate vectors
+        v1 = p2 - p1  # (B, 8, 2)
+        v2 = p3 - p2  # (B, 8, 2)
+
+        # Calculate 2D cross product magnitude: v1.x * v2.y - v1.y * v2.x
+        curvature = v1[..., 0] * v2[..., 1] - v1[..., 1] * v2[..., 0]
+
+        # Concatenate features
+        return torch.cat(
+            [
+                track_directions.reshape(track_center.shape[0], -1),  # (B, 18)
+                curvature,  # (B, 8)
+            ],
+            dim=1,
+        )  # Final shape: (B, 26)
 
     def predict(
         self, track_left: torch.Tensor, track_right: torch.Tensor
