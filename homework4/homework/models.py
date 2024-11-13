@@ -58,7 +58,7 @@ class MLPPlanner(nn.Module):
         num_residual_blocks: int = 3,
         num_endcoder_layers: int = 3,
         hidden_size: int = 512,
-        dropout_rate: float = 0.1,
+        dropout_rate: float = 0.2,
     ):
         """
         Args:
@@ -70,10 +70,16 @@ class MLPPlanner(nn.Module):
         self.n_track = n_track
         self.n_waypoints = n_waypoints
 
+        # Calculate input features with additional geometric features
+        input_features = self.n_track * 2 * 2
+
         # Input projection layer: (B, 40) -> (B, 512)
-        in_dim, out_dim = self.n_track * 2 * 2, hidden_size
+        in_dim, out_dim = input_features, hidden_size
         self.projection = nn.Sequential(
-            nn.Linear(in_dim, out_dim), nn.LayerNorm(out_dim), nn.GELU()
+            nn.BatchNorm1d(input_features),
+            nn.Linear(in_dim, out_dim),
+            nn.LayerNorm(out_dim),
+            nn.GELU(),
         )
 
         # ResNet: (B, 512) -> (B, 512)
@@ -145,7 +151,9 @@ class MLPPlanner(nn.Module):
         x = self.projection(x)
 
         # ResNet
+        global_residual = x
         x = self.resnet(x)
+        x += global_residual
 
         # Encoder
         x = self.encoder(x)
