@@ -38,11 +38,11 @@ class MLPPlanner(nn.Module):
         self,
         n_track: int = 10,
         n_waypoints: int = 3,
-        num_residual_blocks: int = 3,
+        num_residual_blocks: int = 4,
         num_endcoder_layers: int = 3,
-        hidden_size: int = 512,
-        prediction_size: int = 128,
-        dropout_rate: float = 0.1,
+        hidden_size: int = 256,
+        prediction_size: int = 64,
+        dropout_rate: float = 0.2,
     ):
         """
         Args:
@@ -57,7 +57,7 @@ class MLPPlanner(nn.Module):
         # Calculate input features with additional geometric features
         input_features = self.n_track * 2 * 2
 
-        # Input projection layer: (B, 40) -> (B, 512)
+        # Input projection layer: (B, 40) -> (B, 256)
         in_dim, out_dim = input_features, hidden_size
         self.projection = nn.Sequential(
             nn.Linear(in_dim, out_dim),
@@ -65,7 +65,7 @@ class MLPPlanner(nn.Module):
             nn.GELU(),
         )
 
-        # ResNet: (B, 512) -> (B, 512)
+        # ResNet: (B, 256) -> (B, 256)
         in_dim = out_dim
         blocks = [
             BottleneckResidualBlock(
@@ -77,7 +77,7 @@ class MLPPlanner(nn.Module):
         ]
         self.resnet = nn.Sequential(*blocks)
 
-        # Encoder to reducing the dimension: (B, 512) -> (B, 64)
+        # Encoder to reducing the dimension: (B, 256) -> (B, 32)
         encoder_blocks = []
         for _ in range(num_endcoder_layers):
             in_dim, out_dim = out_dim, max(64, out_dim // 2)
@@ -86,7 +86,7 @@ class MLPPlanner(nn.Module):
             )
         self.encoder = nn.Sequential(*encoder_blocks)
 
-        # Shared feature extraction: (B, 64) -> (B, 128)
+        # Shared feature extraction: (B, 32) -> (B, 64)
         in_dim, out_dim = out_dim, prediction_size
         self.shared_features = nn.Sequential(
             nn.Linear(in_dim, out_dim),
