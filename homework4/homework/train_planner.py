@@ -22,7 +22,7 @@ def train(
     model_name: str = "mlp_planner",
     transform_pipeline: str = "state_only",
     num_workers=4,
-    num_epoch: int = 40,
+    num_epoch: int = 20,
     lr: float = 1e-4,
     batch_size: int = 128,
     seed: int = 2024,
@@ -132,7 +132,7 @@ def train(
                 f"l1_error={val_results['l1_error']:.4f} "
                 f"longitudinal_error={val_results['longitudinal_error']:.4f} "
                 f"lateral_error={val_results['lateral_error']:.4f} "
-                f"num_samples={val_results['num_samples']:.4f}"
+                f"num_samples={val_results['num_samples']}"
             )
 
     # save and overwrite the model in the root directory for grading
@@ -150,7 +150,7 @@ if __name__ == "__main__":
     parser.add_argument("--model_name", type=str, default="mlp_planner")
     parser.add_argument("--transform_pipeline", type=str, default="state_only")
     parser.add_argument("--num_workers", type=int, default=4)
-    parser.add_argument("--num_epoch", type=int, default=40)
+    parser.add_argument("--num_epoch", type=int, default=20)
     parser.add_argument("--lr", type=float, default=1e-4)
     parser.add_argument("--seed", type=int, default=2024)
     parser.add_argument("--sample_percent", type=float, default=1.0)

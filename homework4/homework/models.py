@@ -4,7 +4,10 @@ import uuid
 import torch
 import torch.nn as nn
 
-from homework.blocks import BottleneckResidualBlock, EncoderBlock, PredictionHead
+from homework.blocks import (
+    MLPBlock,
+    PredictionHead,
+)
 
 HOMEWORK_DIR = Path(__file__).resolve().parent
 INPUT_MEAN = [0.2788, 0.2657, 0.2629]
@@ -12,11 +15,20 @@ INPUT_STD = [0.2064, 0.1944, 0.2252]
 
 
 class WaypointLoss(nn.Module):
+    def __init__(self, longitudinal_weight: float = 2.0, lateral_weight: float = 1.0):
+        """
+        Args:
+            longitudinal_weight: Weight multiplier for longitudinal errors (x-axis)
+        """
+        super().__init__()
+        self.longitudinal_weight = longitudinal_weight
+        self.lateral_weight = lateral_weight
+
     def forward(
         self, pred: torch.Tensor, target: torch.Tensor, mask: torch.Tensor
     ) -> torch.Tensor:
         """
-        Mean squared error loss for waypoint prediction
+        Weighted mean squared error loss emphasizing longitudinal errors
 
         Args:
             pred: tensor (B, n_waypoints, 2) predicted future positions
@@ -26,11 +38,18 @@ class WaypointLoss(nn.Module):
         Returns:
             tensor, scalar loss
         """
-        # Calculate absolute error
         error = (pred - target).abs()  # (b, n, 2)
-        error_masked = error * mask[..., None]  # (b, n, 2)
+        weights = torch.tensor(
+            [self.longitudinal_weight, self.lateral_weight], device=error.device
+        )[None, None, :]
+        weighted_error = error * weights
 
+        error_masked = weighted_error * mask[..., None]  # (b, n, 2)
         return error_masked.sum()
+
+
+""" AUTOENCODER
+"""
 
 
 class MLPPlanner(nn.Module):
@@ -38,10 +57,8 @@ class MLPPlanner(nn.Module):
         self,
         n_track: int = 10,
         n_waypoints: int = 3,
-        num_residual_blocks: int = 4,
-        num_endcoder_layers: int = 3,
-        hidden_size: int = 256,
-        prediction_size: int = 64,
+        hidden_size: int = 32,
+        bottleneck_size: int = 16,
         dropout_rate: float = 0.2,
     ):
         """
@@ -65,37 +82,15 @@ class MLPPlanner(nn.Module):
             nn.GELU(),
         )
 
-        # ResNet: (B, 256) -> (B, 256)
-        in_dim = out_dim
-        blocks = [
-            BottleneckResidualBlock(
-                hidden_size=in_dim,
-                bottleneck_size=hidden_size // 2,
-                dropout_rate=dropout_rate,
-            )
-            for _ in range(num_residual_blocks)
-        ]
-        self.resnet = nn.Sequential(*blocks)
+        # ENCODER: (B, 64) -> (B, 16)
+        in_dim, out_dim = out_dim, bottleneck_size
+        self.encoder = MLPBlock(in_dim, out_dim, dropout_rate)
 
-        # Encoder to reducing the dimension: (B, 256) -> (B, 32)
-        encoder_blocks = []
-        for _ in range(num_endcoder_layers):
-            in_dim, out_dim = out_dim, max(64, out_dim // 2)
-            encoder_blocks.append(
-                EncoderBlock(in_dim=in_dim, out_dim=out_dim, dropout_rate=dropout_rate)
-            )
-        self.encoder = nn.Sequential(*encoder_blocks)
+        # DECODER: (B, 16) -> (B, 64)
+        in_dim, out_dim = out_dim, hidden_size
+        self.decoder = MLPBlock(in_dim, out_dim, dropout_rate)
 
-        # Shared feature extraction: (B, 32) -> (B, 64)
-        in_dim, out_dim = out_dim, prediction_size
-        self.shared_features = nn.Sequential(
-            nn.Linear(in_dim, out_dim),
-            nn.LayerNorm(out_dim),
-            nn.GELU(),
-            nn.Dropout(dropout_rate),
-        )
-
-        # Separate prediction heads: (B, 64) -> (B, waypoints)
+        # Separate prediction heads: (B, 256) -> (B, waypoints)
         in_dim, out_dim = out_dim, n_waypoints
         self.longitudinal_head = PredictionHead(in_dim, out_dim)
         self.lateral_head = PredictionHead(in_dim, out_dim)
@@ -137,68 +132,20 @@ class MLPPlanner(nn.Module):
         )
 
         # Projection
-        x = self.projection(x)
+        enc_input = self.projection(x)
 
-        # ResNet
-        global_residual = x
-        x = self.resnet(x)
-        x += global_residual
+        # Shared encoder - decoder
+        bottleneck = self.encoder(enc_input)  # (B, 16)
 
-        # Encoder
-        x = self.encoder(x)
-
-        # Shared features
-        x = self.shared_features(x)
+        dec = self.decoder(bottleneck)  # (B, 64)
+        dec += enc_input  # residual
 
         # Results
-        y_longtitude = self.longitudinal_head(x)
-        y_latitude = self.lateral_head(x)
+        y_longtitude = self.longitudinal_head(dec)
+        y_latitude = self.lateral_head(dec)
         y = torch.stack([y_longtitude, y_latitude], dim=-1)
 
         return y
-
-    def _extract_geometric_features(self, track_center):
-        """
-        Extract geometric features from track centerline points.
-
-        Args:
-            track_center: Tensor of shape (B, 10, 2) containing track centerline points
-                where B is batch size
-
-        Returns:
-            Tensor of shape (B, 34) containing concatenated direction and curvature features
-        """
-        # Calculate track directions (vectors between consecutive points)
-        track_directions = track_center[:, 1:] - track_center[:, :-1]  # (B, 9, 2)
-
-        # Calculate curvature using three consecutive points
-        curvature = torch.zeros(
-            track_center.shape[0],
-            8,
-            dtype=track_center.dtype,
-            device=track_center.device,
-        )
-
-        # Get consecutive point triplets
-        p1 = track_center[:, :-2]  # (B, 8, 2)
-        p2 = track_center[:, 1:-1]  # (B, 8, 2)
-        p3 = track_center[:, 2:]  # (B, 8, 2)
-
-        # Calculate vectors
-        v1 = p2 - p1  # (B, 8, 2)
-        v2 = p3 - p2  # (B, 8, 2)
-
-        # Calculate 2D cross product magnitude: v1.x * v2.y - v1.y * v2.x
-        curvature = v1[..., 0] * v2[..., 1] - v1[..., 1] * v2[..., 0]
-
-        # Concatenate features
-        return torch.cat(
-            [
-                track_directions.reshape(track_center.shape[0], -1),  # (B, 18)
-                curvature,  # (B, 8)
-            ],
-            dim=1,
-        )  # Final shape: (B, 26)
 
     def predict(
         self, track_left: torch.Tensor, track_right: torch.Tensor
