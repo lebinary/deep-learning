@@ -48,7 +48,7 @@ class WaypointLoss(nn.Module):
         return error_masked.sum()
 
 
-""" AUTOENCODER
+""" Bidirectional RNN
 """
 
 
@@ -57,7 +57,6 @@ class MLPPlanner(nn.Module):
         self,
         n_track: int = 10,
         n_waypoints: int = 3,
-        num_layers: int = 4,
         hidden_size: int = 256,
         dropout_rate: float = 0.2,
     ):
@@ -73,22 +72,14 @@ class MLPPlanner(nn.Module):
 
         # Projection
         in_dim, out_dim = n_track * 2 * 2, hidden_size
-        self.projection = MLPBlock(in_dim, out_dim, dropout_rate)
+        self.forward_pass = MLPBlock(in_dim, out_dim, dropout_rate)
+        self.backward_pass = MLPBlock(in_dim, out_dim, dropout_rate)
 
         # Build the layers
-        layers = []
-        for _ in range(num_layers):
-            in_dim, out_dim = out_dim, max(16, out_dim // 2)
-            layers.extend(
-                [
-                    nn.Linear(in_dim, out_dim),
-                    nn.LayerNorm(out_dim),
-                    nn.ReLU(),
-                    nn.Dropout(dropout_rate),
-                ]
-            )
-        self.mlp_deep = nn.Sequential(*layers)
+        in_dim, out_dim = out_dim * 2, hidden_size
+        self.combine = MLPBlock(in_dim, out_dim, dropout_rate)
 
+        # Predictions
         in_dim, out_dim = out_dim, n_waypoints
         self.longitudinal_head = PredictionHead(in_dim, out_dim)
         self.lateral_head = PredictionHead(in_dim, out_dim)
@@ -130,10 +121,11 @@ class MLPPlanner(nn.Module):
         )
 
         # Projection
-        x_proj = self.projection(x)
+        x_forward = self.forward_pass(x)
+        x_backward = self.backward_pass(torch.flip(x, [1]))
 
         # Pyramid
-        x_deep = self.mlp_deep(x_proj)
+        x_deep = self.combine(torch.concat([x_forward, x_backward], dim=1))
 
         # Results
         y_longtitude = self.longitudinal_head(x_deep)
