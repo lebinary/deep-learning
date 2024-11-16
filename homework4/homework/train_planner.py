@@ -22,7 +22,7 @@ def train(
     model_name: str = "mlp_planner",
     transform_pipeline: str = "state_only",
     num_workers=4,
-    num_epoch: int = 50,
+    num_epoch: int = 20,
     lr: float = 1e-4,
     batch_size: int = 128,
     seed: int = 2024,
@@ -150,7 +150,7 @@ if __name__ == "__main__":
     parser.add_argument("--model_name", type=str, default="mlp_planner")
     parser.add_argument("--transform_pipeline", type=str, default="state_only")
     parser.add_argument("--num_workers", type=int, default=4)
-    parser.add_argument("--num_epoch", type=int, default=50)
+    parser.add_argument("--num_epoch", type=int, default=20)
     parser.add_argument("--lr", type=float, default=1e-4)
     parser.add_argument("--seed", type=int, default=2024)
     parser.add_argument("--sample_percent", type=float, default=1.0)

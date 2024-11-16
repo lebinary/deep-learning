@@ -57,8 +57,8 @@ class MLPPlanner(nn.Module):
         self,
         n_track: int = 10,
         n_waypoints: int = 3,
-        num_layers: int = 4,
-        hidden_size: int = 256,
+        hidden_size: int = 32,
+        bottleneck_size: int = 16,
         dropout_rate: float = 0.2,
     ):
         """
@@ -71,24 +71,26 @@ class MLPPlanner(nn.Module):
         self.n_track = n_track
         self.n_waypoints = n_waypoints
 
-        # Projection
-        in_dim, out_dim = n_track * 2 * 2, hidden_size
-        self.projection = MLPBlock(in_dim, out_dim, dropout_rate)
+        # Calculate input features with additional geometric features
+        input_features = self.n_track * 2 * 2
 
-        # Build the layers
-        layers = []
-        for _ in range(num_layers):
-            in_dim, out_dim = out_dim, max(16, out_dim // 2)
-            layers.extend(
-                [
-                    nn.Linear(in_dim, out_dim),
-                    nn.LayerNorm(out_dim),
-                    nn.ReLU(),
-                    nn.Dropout(dropout_rate),
-                ]
-            )
-        self.mlp_deep = nn.Sequential(*layers)
+        # Input projection layer: (B, 40) -> (B, 256)
+        in_dim, out_dim = input_features, hidden_size
+        self.projection = nn.Sequential(
+            nn.Linear(in_dim, out_dim),
+            nn.LayerNorm(out_dim),
+            nn.GELU(),
+        )
 
+        # ENCODER: (B, 64) -> (B, 16)
+        in_dim, out_dim = out_dim, bottleneck_size
+        self.encoder = MLPBlock(in_dim, out_dim, dropout_rate)
+
+        # DECODER: (B, 16) -> (B, 64)
+        in_dim, out_dim = out_dim, hidden_size
+        self.decoder = MLPBlock(in_dim, out_dim, dropout_rate)
+
+        # Separate prediction heads: (B, 256) -> (B, waypoints)
         in_dim, out_dim = out_dim, n_waypoints
         self.longitudinal_head = PredictionHead(in_dim, out_dim)
         self.lateral_head = PredictionHead(in_dim, out_dim)
@@ -123,21 +125,24 @@ class MLPPlanner(nn.Module):
         left_flat = left_normalized.view(left_normalized.size(0), -1)
         right_flat = right_normalized.view(right_normalized.size(0), -1)
 
-        # Concat flatten tracks, (B, 20) + (B, 20) -> (B, 60)
+        # Concat flatten tracks, (B, 20) + (B, 20) + (B, 26) -> (B, 60)
         x = torch.concat(
             [left_flat, right_flat],
             dim=1,
         )
 
         # Projection
-        x_proj = self.projection(x)
+        enc_input = self.projection(x)
 
-        # Pyramid
-        x_deep = self.mlp_deep(x_proj)
+        # Shared encoder - decoder
+        bottleneck = self.encoder(enc_input)  # (B, 16)
+
+        dec = self.decoder(bottleneck)  # (B, 64)
+        dec += enc_input  # residual
 
         # Results
-        y_longtitude = self.longitudinal_head(x_deep)
-        y_latitude = self.lateral_head(x_deep)
+        y_longtitude = self.longitudinal_head(dec)
+        y_latitude = self.lateral_head(dec)
         y = torch.stack([y_longtitude, y_latitude], dim=-1)
 
         return y
