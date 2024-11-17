@@ -1,13 +1,15 @@
 from pathlib import Path
 import os
+from typing import Tuple
 import uuid
 import torch
 import torch.nn as nn
 
 from homework.blocks import (
+    CrossAttentionBlock,
     MLPBlock,
-    PredictionHead,
 )
+from homework.embeddings import TrackEmbedding
 
 HOMEWORK_DIR = Path(__file__).resolve().parent
 INPUT_MEAN = [0.2788, 0.2657, 0.2629]
@@ -84,16 +86,16 @@ class MLPPlanner(nn.Module):
 
         # ENCODER: (B, 64) -> (B, 16)
         in_dim, out_dim = out_dim, bottleneck_size
-        self.encoder = MLPBlock(in_dim, out_dim, dropout_rate)
+        self.encoder = MLPBlock(in_dim, out_dim, dropout_rate=dropout_rate)
 
         # DECODER: (B, 16) -> (B, 64)
         in_dim, out_dim = out_dim, hidden_size
-        self.decoder = MLPBlock(in_dim, out_dim, dropout_rate)
+        self.decoder = MLPBlock(in_dim, out_dim, dropout_rate=dropout_rate)
 
-        # Separate prediction heads: (B, 256) -> (B, waypoints)
+        # Separate prediction heads: (B, 64) -> (B, waypoints)
         in_dim, out_dim = out_dim, n_waypoints
-        self.longitudinal_head = PredictionHead(in_dim, out_dim)
-        self.lateral_head = PredictionHead(in_dim, out_dim)
+        self.longitudinal_head = MLPBlock(in_dim, out_dim)
+        self.lateral_head = MLPBlock(in_dim, out_dim)
 
     def forward(
         self,
@@ -115,17 +117,15 @@ class MLPPlanner(nn.Module):
             torch.Tensor: future waypoints with shape (b, n_waypoints, 2)
         """
         # Normalized based on the center line
-        track_center = (track_left + track_right) / 2
-        track_width = (track_right - track_left).norm(dim=-1, keepdim=True)
-
-        left_normalized = (track_left - track_center) / track_width
-        right_normalized = (track_right - track_center) / track_width
+        left_normalized, right_normalized = normalize_track_boundaries(
+            track_left, track_right
+        )
 
         # Flatten both track tensors and track direction, (B, 10, 2) -> (B, 20)
         left_flat = left_normalized.view(left_normalized.size(0), -1)
         right_flat = right_normalized.view(right_normalized.size(0), -1)
 
-        # Concat flatten tracks, (B, 20) + (B, 20) + (B, 26) -> (B, 60)
+        # Concat flatten tracks, (B, 20) + (B, 20) -> (B, 60)
         x = torch.concat(
             [left_flat, right_flat],
             dim=1,
@@ -177,7 +177,17 @@ class TransformerPlanner(nn.Module):
         self.n_track = n_track
         self.n_waypoints = n_waypoints
 
+        # Embeddings
         self.query_embed = nn.Embedding(n_waypoints, d_model)
+        self.keyval_embed = TrackEmbedding(d_model)
+
+        # Attention
+        in_dim, out_dim = d_model, d_model
+        self.cross_attention = CrossAttentionBlock(in_dim, out_dim)
+
+        # Prediction head
+        in_dim, out_dim = out_dim, 2
+        self.prediction_mlp = MLPBlock(in_dim, out_dim)
 
     def forward(
         self,
@@ -198,7 +208,47 @@ class TransformerPlanner(nn.Module):
         Returns:
             torch.Tensor: future waypoints with shape (b, n_waypoints, 2)
         """
-        raise NotImplementedError
+        batch_size = track_left.size(0)
+
+        # Normalized based on the center line
+        left_normalized, right_normalized = normalize_track_boundaries(
+            track_left, track_right
+        )
+
+        # Positional embedding for inputs
+        left_embedded = self.keyval_embed(left_normalized)  # (B, 10, 64)
+        right_embedded = self.keyval_embed(right_normalized)  # (B, 10, 64)
+
+        # Set up inputs
+        query = self.query_embed.weight.unsqueeze(0).expand(
+            batch_size, -1, -1
+        )  # (B, 3, 64)
+        key_value = torch.cat([left_embedded, right_embedded], dim=1)  # (B, 20, 64)
+
+        # Attention
+        attn_output = self.cross_attention(query, key_value)  # (B, 3, 64)
+
+        # Results
+        y = self.prediction_mlp(attn_output)
+
+        return y
+
+    def predict(
+        self, track_left: torch.Tensor, track_right: torch.Tensor
+    ) -> torch.Tensor:
+        """
+        Used for inference, predicts waypoints from the left and right boundaries of the track.
+
+        Args:
+            track_left (torch.Tensor): shape (b, n_track, 2)
+            track_right (torch.Tensor): shape (b, n_track, 2)
+
+        Returns:
+            torch.Tensor: future waypoints with shape (b, n_waypoints, 2)
+        """
+        pred_waypoints = self(track_left, track_right)
+
+        return pred_waypoints
 
 
 class CNNPlanner(torch.nn.Module):
@@ -322,3 +372,35 @@ def calculate_model_size_mb(model: torch.nn.Module) -> float:
     Naive way to estimate model size
     """
     return sum(p.numel() for p in model.parameters()) * 4 / 1024 / 1024
+
+
+def normalize_track_boundaries(
+    track_left: torch.Tensor, track_right: torch.Tensor
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    """
+    Normalizes track boundaries around their center.
+
+    Args:
+        track_left: Left boundary points tensor of shape (B, N, 2)
+        track_right: Right boundary points tensor of shape (B, N, 2)
+
+    Returns:
+        Tuple containing:
+        - left_normalized: Normalized left boundary vectors (B, N, 2)
+        - right_normalized: Normalized right boundary vectors (B, N, 2)
+    """
+    # Validate input shapes
+    assert (
+        track_left.shape == track_right.shape
+    ), "Track boundaries must have same shape"
+    assert track_left.size(-1) == 2, "Last dimension must be 2 for (x,y) coordinates"
+
+    # Calculate center line and track width
+    track_center = (track_left + track_right) / 2
+    track_width = (track_right - track_left).norm(dim=-1, keepdim=True)
+
+    # Normalize boundaries relative to center
+    left_normalized = (track_left - track_center) / track_width
+    right_normalized = (track_right - track_center) / track_width
+
+    return left_normalized, right_normalized
