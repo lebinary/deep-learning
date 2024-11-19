@@ -149,33 +149,25 @@ class ResidualCNNBlock(nn.Module):
         up_sampling=False,
     ):
         super().__init__()
-        self.cnn_block = nn.Sequential(
-            nn.Conv2d(in_dim, out_dim, kernel_size=kernel_size, padding=padding),
-            nn.BatchNorm2d(out_dim),
-            nn.GELU(),
-        )
-
-        if in_dim != out_dim or stride != 1:
-            # Input and output dimension dont match
-            if up_sampling:
-                self.shortcut = nn.ConvTranspose2d(
-                    in_dim,
-                    out_dim,
-                    kernel_size=1,
-                    stride=stride,
-                    output_padding=1,
-                )
-            else:
-                self.shortcut = nn.Conv2d(in_dim, out_dim, kernel_size=1, stride=stride)
+        if up_sampling:
+            self.cnn_block = nn.Sequential(
+                nn.ConvTranspose2d(in_dim, out_dim, kernel_size=kernel_size, stride=stride, padding=padding, output_padding=stride-1),
+                nn.BatchNorm2d(out_dim),
+                nn.GELU(),
+            )
+            self.shortcut = nn.ConvTranspose2d(in_dim, out_dim, kernel_size=1, stride=stride, output_padding=stride-1)
         else:
-            # Dimension matched
-            self.shortcut = nn.Identity()
+            self.cnn_block = nn.Sequential(
+                nn.Conv2d(in_dim, out_dim, kernel_size=kernel_size, stride=stride, padding=padding),
+                nn.BatchNorm2d(out_dim),
+                nn.GELU(),
+            )
+            self.shortcut = nn.Conv2d(in_dim, out_dim, kernel_size=1, stride=stride) if (in_dim != out_dim or stride != 1) else nn.Identity()
 
     def forward(self, x):
         residual = self.shortcut(x)
         out = self.cnn_block(x)
-        out += residual
-        return out
+        return out + residual
 
 
 class ASPP(nn.Module):

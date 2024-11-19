@@ -52,6 +52,24 @@ class WaypointLoss(nn.Module):
         return error_masked.sum()
 
 
+class TrackLoss(nn.Module):
+    def forward(
+        self, pred: torch.Tensor, target: torch.Tensor, mask: torch.Tensor
+    ) -> torch.Tensor:
+        """
+        Weighted mean squared error loss emphasizing longitudinal errors
+
+        Args:
+            pred: tensor (B, n_track, 2) predicted future positions
+            target: tensor (B, n_track, 2) ground truth future positions
+        Returns:
+            tensor, scalar loss
+        """
+        error = (pred - target).abs()  # (b, n, 2)
+
+        return error
+
+
 """ AUTOENCODER
 """
 
@@ -257,6 +275,7 @@ class CNNPlanner(torch.nn.Module):
     def __init__(
         self,
         n_waypoints: int = 3,
+        dropout_rate: float = 0.2,
     ):
         super().__init__()
 
@@ -268,46 +287,65 @@ class CNNPlanner(torch.nn.Module):
         self.register_buffer("input_std", torch.as_tensor(INPUT_STD), persistent=False)
 
         # Input size = (3, H, W)
-        
+
         # ENCODER:
         in_dim, out_dim = 3, 16
-        self.encoder_block1 = ResidualCNNBlock(in_dim, out_dim, stride=2) # -> (16, H/2, W/2)
-        
+        self.encoder_block1 = ResidualCNNBlock(
+            in_dim, out_dim, stride=2
+        )  # -> (16, H/2, W/2)
+
         in_dim, out_dim = out_dim, 32
-        self.encoder_block2 = ResidualCNNBlock(in_dim, out_dim, stride=2) # -> (32, H/4, W/4)
+        self.encoder_block2 = ResidualCNNBlock(
+            in_dim, out_dim, stride=2
+        )  # -> (32, H/4, W/4)
 
         in_dim, out_dim = out_dim, 64
-        self.encoder_block3 = ResidualCNNBlock(in_dim, out_dim, stride=2) # -> (64, H/8, W/8)
-        
+        self.encoder_block3 = ResidualCNNBlock(
+            in_dim, out_dim, stride=2
+        )  # -> (64, H/8, W/8)
+
         in_dim, out_dim = out_dim, 128
-        self.encoder_block4 = ResidualCNNBlock(in_dim, out_dim, stride=2) # -> (128, H/16, W/16)
-        
+        self.encoder_block4 = ResidualCNNBlock(
+            in_dim, out_dim, stride=2
+        )  # -> (128, H/16, W/16)
+
         # BOTTLENECK: use ASPP for better feature extraction
         self.bottle_neck = ASPP(128, 128)
-        
+
         # DECODER:
         in_dim, out_dim = out_dim, 64
-        self.encoder_block1 = ResidualCNNBlock(in_dim, out_dim, stride=2, up_sampling=True) #  -> (64, H/8, W/8)
-        
+        self.decoder_block1 = ResidualCNNBlock(
+            in_dim, out_dim, stride=2, up_sampling=True
+        )  #  -> (64, H/8, W/8)
+
         in_dim, out_dim = out_dim, 32
-        self.encoder_block2 = ResidualCNNBlock(in_dim, out_dim, stride=2, up_sampling=True) #  -> (32, H/4, W/4)
-        
+        self.decoder_block2 = ResidualCNNBlock(
+            in_dim, out_dim, stride=2, up_sampling=True
+        )  #  -> (32, H/4, W/4)
+
         in_dim, out_dim = out_dim, 16
-        self.encoder_block3 = ResidualCNNBlock(in_dim, out_dim, stride=2, up_sampling=True) #  -> (16, H/2, W/2)
-        
+        self.decoder_block3 = ResidualCNNBlock(
+            in_dim, out_dim, stride=2, up_sampling=True
+        )  #  -> (16, H/2, W/2)
+
         in_dim, out_dim = out_dim, 16
-        self.encoder_block4 = ResidualCNNBlock(in_dim, out_dim, stride=2, up_sampling=True) #  -> (16, H, W)
-        
+        self.decoder_block4 = ResidualCNNBlock(
+            in_dim, out_dim, stride=2, up_sampling=True
+        )  #  -> (16, H, W)
+
         # FINAL LAYERS
         self.global_pool = nn.Sequential(
-            nn.AdaptiveAvgPool2d(1),
-            nn.Flatten()
+            nn.AdaptiveAvgPool2d(1), nn.Dropout(dropout_rate=dropout_rate), nn.Flatten()
         )
-        
+
+        # waypoints head
         in_dim, out_dim = out_dim, n_waypoints
         self.longitudinal_head = MLPBlock(in_dim, out_dim)
         self.lateral_head = MLPBlock(in_dim, out_dim)
 
+        # track_left, track_right
+        self.left_head = MLPBlock(in_dim, 20)
+        self.right_head = MLPBlock(in_dim, 20)
 
     def forward(self, image: torch.Tensor, **kwargs) -> torch.Tensor:
         """
@@ -321,36 +359,33 @@ class CNNPlanner(torch.nn.Module):
         x = (x - self.input_mean[None, :, None, None]) / self.input_std[
             None, :, None, None
         ]
-        print(x.size())
 
         # Shared encoder - decoder
-        enc1 = self.encoder_block1(x)       # (16, H/2, W/2)
-        enc2 = self.encoder_block2(enc1)    # (32, H/4, W/4)
-        enc3 = self.encoder_block3(enc2)    # (64, H//8, H/8)
-        enc4 = self.encoder_block4(enc3)    # (128, H/16, H/16)
-        
-        features = self.bottle_neck(enc4)   # features extraction
-        
-        dec1 = self.decoder_block1(features)# (64, H/8, H/8)
-        dec1 += enc3                        # residual
-        dec2 = self.decoder_block2(dec1)    # (32, H/4, H/4)
-        dec2 += enc2                        # residual
-        dec3 = self.decoder_block3(dec2)    # (16, H/2, H/2)
-        dec3 = dec3 + enc1                  # residual
-        dec4 = self.decocder_block4(dec3)   # (16, H, W)
+        enc1 = self.encoder_block1(x)  # (16, H/2, W/2)
+        enc2 = self.encoder_block2(enc1)  # (32, H/4, W/4)
+        enc3 = self.encoder_block3(enc2)  # (64, H//8, H/8)
+        enc4 = self.encoder_block4(enc3)  # (128, H/16, H/16)
+
+        features = self.bottle_neck(enc4)  # features extraction
+
+        dec1 = self.decoder_block1(features)  # (64, H/8, H/8)
+        dec1 += enc3  # residual
+        dec2 = self.decoder_block2(dec1)  # (32, H/4, H/4)
+        dec2 += enc2  # residual
+        dec3 = self.decoder_block3(dec2)  # (16, H/2, H/2)
+        dec3 = dec3 + enc1  # residual
+        dec4 = self.decoder_block4(dec3)  # (16, H, W)
 
         y_pool = self.global_pool(dec4)  # (16,)
 
         # MLP branches
-        y_longtitude = self.longitudinal_head(y_pool)           # (3,)
-        y_latitude = self.lateral_head(y_pool)                  # (3,)
+        y_longtitude = self.longitudinal_head(y_pool)  # (3,)
+        y_latitude = self.lateral_head(y_pool)  # (3,)
         y = torch.stack([y_longtitude, y_latitude], dim=-1)
 
         return y
 
-    def predict(
-        self, image: torch.Tensor
-    ) -> torch.Tensor:
+    def predict(self, image: torch.Tensor) -> torch.Tensor:
         """
         Used for inference, predicts waypoints from the left and right boundaries of the track.
 
