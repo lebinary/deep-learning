@@ -30,14 +30,14 @@ class ResidualBlock(nn.Module):
         self.block = nn.Sequential(
             nn.Linear(hidden_size, hidden_size),
             nn.LayerNorm(hidden_size),
-            nn.GELU(),
+            nn.ReLU(),
             nn.Dropout(dropout_rate),
             nn.Linear(hidden_size, hidden_size),
             nn.LayerNorm(hidden_size),
             nn.Dropout(dropout_rate),
         )
 
-        self.activation = nn.GELU()
+        self.activation = nn.ReLU()
 
     def forward(self, x):
         return self.activation(x + self.block(x))
@@ -51,17 +51,22 @@ class BottleneckResidualBlock(nn.Module):
         self.net = nn.Sequential(
             nn.Linear(hidden_size, bottleneck_size),
             nn.LayerNorm(bottleneck_size),
-            nn.GELU(),
+            nn.ReLU(),
             nn.Dropout(dropout_rate),
             nn.Linear(bottleneck_size, bottleneck_size),
             nn.LayerNorm(bottleneck_size),
-            nn.GELU(),
+            nn.ReLU(),
             nn.Dropout(dropout_rate),
             nn.Linear(bottleneck_size, hidden_size),
         )
 
     def forward(self, x):
         return x + self.net(x)
+
+
+"""
+TRANSFORMER
+"""
 
 
 class CrossAttentionBlock(nn.Module):
@@ -126,3 +131,88 @@ class CrossAttentionBlock(nn.Module):
         out = self.dropout(out)
 
         return residual + out  # (B, 3, 64)
+
+
+"""
+CNN
+"""
+
+
+class ResidualCNNBlock(nn.Module):
+    def __init__(
+        self,
+        in_dim,
+        out_dim,
+        stride=1,
+        kernel_size=3,
+        padding=1,
+        up_sampling=False,
+    ):
+        super().__init__()
+        self.cnn_block = nn.Sequential(
+            nn.Conv2d(in_dim, out_dim, kernel_size=kernel_size, padding=padding),
+            nn.BatchNorm2d(out_dim),
+            nn.GELU(),
+        )
+
+        if in_dim != out_dim or stride != 1:
+            # Input and output dimension dont match
+            if up_sampling:
+                self.shortcut = nn.ConvTranspose2d(
+                    in_dim,
+                    out_dim,
+                    kernel_size=1,
+                    stride=stride,
+                    output_padding=1,
+                )
+            else:
+                self.shortcut = nn.Conv2d(in_dim, out_dim, kernel_size=1, stride=stride)
+        else:
+            # Dimension matched
+            self.shortcut = nn.Identity()
+
+    def forward(self, x):
+        residual = self.shortcut(x)
+        out = self.cnn_block(x)
+        out += residual
+        return out
+
+
+class ASPP(nn.Module):
+    def __init__(self, in_channels, out_channels):
+        super().__init__()
+        # Atrous Spatial Pyramid Pooling
+
+        # Input size: (128, H/16, H/16)
+        # Output size: (128, H/16, H/16)
+
+        # Use different dilation rates to capture local contexts
+        self.conv1 = nn.Conv2d(in_channels, out_channels, 1)
+        self.conv2 = nn.Conv2d(in_channels, out_channels, 3, padding=6, dilation=6)
+        self.conv3 = nn.Conv2d(in_channels, out_channels, 3, padding=12, dilation=12)
+        self.conv4 = nn.Conv2d(in_channels, out_channels, 3, padding=18, dilation=18)
+
+        # Average pooling to reduce spatial dims, then upsample back to capture global context
+        self.pool = nn.AdaptiveAvgPool2d(1)
+        self.conv5 = nn.Conv2d(in_channels, out_channels, 1)
+
+        self.project = nn.Sequential(
+            nn.Conv2d(5 * out_channels, out_channels, 1),
+            nn.BatchNorm2d(out_channels),
+            nn.GELU(),
+            nn.Dropout2d(0.1),
+        )
+
+    def forward(self, x):
+        feat1 = self.conv1(x)
+        feat2 = self.conv2(x)
+        feat3 = self.conv3(x)
+        feat4 = self.conv4(x)
+        feat5 = nn.functional.interpolate(
+            self.conv5(self.pool(x)),
+            size=x.shape[-2:],
+            mode="bilinear",
+            align_corners=False,
+        )
+        out = torch.cat((feat1, feat2, feat3, feat4, feat5), dim=1)
+        return self.project(out)
