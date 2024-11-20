@@ -2,6 +2,10 @@ import torch
 import torch.nn as nn
 import math
 
+"""
+MLP
+"""
+
 
 class MLPBlock(nn.Module):
     def __init__(
@@ -146,23 +150,45 @@ class ResidualCNNBlock(nn.Module):
         stride=1,
         kernel_size=3,
         padding=1,
+        dropout_rate=0.1,
         up_sampling=False,
     ):
         super().__init__()
         if up_sampling:
             self.cnn_block = nn.Sequential(
-                nn.ConvTranspose2d(in_dim, out_dim, kernel_size=kernel_size, stride=stride, padding=padding, output_padding=stride-1),
+                nn.ConvTranspose2d(
+                    in_dim,
+                    out_dim,
+                    kernel_size=kernel_size,
+                    stride=stride,
+                    padding=padding,
+                    output_padding=stride - 1,
+                ),
                 nn.BatchNorm2d(out_dim),
-                nn.GELU(),
+                nn.ReLU(),
+                nn.Dropout2d(dropout_rate),
             )
-            self.shortcut = nn.ConvTranspose2d(in_dim, out_dim, kernel_size=1, stride=stride, output_padding=stride-1)
+            self.shortcut = nn.ConvTranspose2d(
+                in_dim, out_dim, kernel_size=1, stride=stride, output_padding=stride - 1
+            )
         else:
             self.cnn_block = nn.Sequential(
-                nn.Conv2d(in_dim, out_dim, kernel_size=kernel_size, stride=stride, padding=padding),
+                nn.Conv2d(
+                    in_dim,
+                    out_dim,
+                    kernel_size=kernel_size,
+                    stride=stride,
+                    padding=padding,
+                ),
                 nn.BatchNorm2d(out_dim),
-                nn.GELU(),
+                nn.ReLU(),
+                nn.Dropout2d(dropout_rate),
             )
-            self.shortcut = nn.Conv2d(in_dim, out_dim, kernel_size=1, stride=stride) if (in_dim != out_dim or stride != 1) else nn.Identity()
+            self.shortcut = (
+                nn.Conv2d(in_dim, out_dim, kernel_size=1, stride=stride)
+                if (in_dim != out_dim or stride != 1)
+                else nn.Identity()
+            )
 
     def forward(self, x):
         residual = self.shortcut(x)

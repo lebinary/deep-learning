@@ -9,7 +9,7 @@ import torch.utils.tensorboard as tb
 from homework.metrics import PlannerMetric
 from homework.utils import create_subset
 
-from .models import WaypointLoss, load_model, save_model
+from .models import TrackLoss, WaypointLoss, cal_track_center, load_model, normalize_track_boundaries, save_model
 from .datasets.road_dataset import load_data
 
 
@@ -24,8 +24,8 @@ def train(
     model_name: str = "cnn_planner",
     transform_pipeline: str = "default",
     num_workers=4,
-    num_epoch: int = 40,
-    lr: float = 1e-3,
+    num_epoch: int = 30,
+    lr: float = 1e-4,
     batch_size: int = 128,
     seed: int = 2024,
     sample_percent: float = 1,
@@ -81,13 +81,12 @@ def train(
         f"Validating on {len(val_dataset)} samples ({sample_percent * 100}% of full dataset)"
     )
 
-    # create loss function and optimizer
-    waypoint_loss_fn = WaypointLoss()
+    # Loss func
+    waypoint_loss_fn = WaypointLoss(longitudinal_weight=3)
+    track_loss_fn = TrackLoss()
 
     # Optimizer
     optimizer = torch.optim.Adam(model.parameters(), lr=lr)
-
-    global_step = 0
 
     # Setup metrics for both training and validation
     train_metrics = PlannerMetric()
@@ -102,9 +101,14 @@ def train(
         # TRAINING
         model.train()
         for batch in train_data:
+            # image data
             image = batch["image"].to(device)
-            track_left = batch["track_left"].to(device)
-            track_right = batch["track_right"].to(device)
+
+            # track groundtruth
+            left_normalized, right_normalized = normalize_track_boundaries(batch["track_left"], batch["track_right"])
+            track_normalized = torch.cat([left_normalized, right_normalized], dim=1).to(device)
+
+            # waypoiny groundtruth
             waypoints = batch["waypoints"].to(device)
             waypoints_mask = batch["waypoints_mask"].to(device)
 
@@ -113,10 +117,12 @@ def train(
 
             # Compute losses
             waypoint_loss = waypoint_loss_fn(pred_waypoints, waypoints, waypoints_mask)
+            track_loss = track_loss_fn(model.pred_track, track_normalized)
+            optimize_loss = 2*waypoint_loss + track_loss
 
             # Backward pass and optimization
             optimizer.zero_grad(set_to_none=True)
-            waypoint_loss.backward()
+            optimize_loss.backward()
             optimizer.step()
 
             # Update metrics (after converting logits to predictions)
@@ -129,8 +135,6 @@ def train(
 
             for batch in val_data:
                 image = batch["image"].to(device)
-                track_left = batch["track_left"].to(device)
-                track_right = batch["track_right"].to(device)
                 waypoints = batch["waypoints"].to(device)
                 waypoints_mask = batch["waypoints_mask"].to(device)
 
@@ -175,8 +179,8 @@ if __name__ == "__main__":
     parser.add_argument("--model_name", type=str, default="cnn_planner")
     parser.add_argument("--transform_pipeline", type=str, default="default")
     parser.add_argument("--num_workers", type=int, default=4)
-    parser.add_argument("--num_epoch", type=int, default=40)
-    parser.add_argument("--lr", type=float, default=1e-3)
+    parser.add_argument("--num_epoch", type=int, default=30)
+    parser.add_argument("--lr", type=float, default=1e-4)
     parser.add_argument("--seed", type=int, default=2024)
     parser.add_argument("--sample_percent", type=float, default=1.0)
 

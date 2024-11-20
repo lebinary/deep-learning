@@ -4,6 +4,8 @@ from typing import Tuple
 import uuid
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
+
 
 from homework.blocks import (
     ASPP,
@@ -19,55 +21,45 @@ INPUT_STD = [0.2064, 0.1944, 0.2252]
 
 
 class WaypointLoss(nn.Module):
-    def __init__(self, longitudinal_weight: float = 2.0, lateral_weight: float = 1.0):
-        """
-        Args:
-            longitudinal_weight: Weight multiplier for longitudinal errors (x-axis)
-        """
+    def __init__(self, longitudinal_weight=2.0, lateral_weight=1.0):
         super().__init__()
         self.longitudinal_weight = longitudinal_weight
         self.lateral_weight = lateral_weight
 
-    def forward(
-        self, pred: torch.Tensor, target: torch.Tensor, mask: torch.Tensor
-    ) -> torch.Tensor:
+    def forward(self, pred, target, mask) -> torch.Tensor:
         """
-        Weighted mean squared error loss emphasizing longitudinal errors
-
         Args:
-            pred: tensor (B, n_waypoints, 2) predicted future positions
-            target: tensor (B, n_waypoints, 2) ground truth future positions
-            mask: tensor (B, n_waypoints) boolean mask for valid waypoints
-
-        Returns:
-            tensor, scalar loss
+            pred, target: (B, 3, 2)
         """
-        error = (pred - target).abs()  # (b, n, 2)
-        weights = torch.tensor(
-            [self.longitudinal_weight, self.lateral_weight], device=error.device
+
+        # L2 loss for smoother gradients
+        error = (pred - target).pow(2)
+
+        # Directional weighting
+        directional_weight = torch.tensor(
+            [self.longitudinal_weight, self.lateral_weight], device=pred.device
         )[None, None, :]
-        weighted_error = error * weights
 
-        error_masked = weighted_error * mask[..., None]  # (b, n, 2)
-        return error_masked.sum()
-
+        masked_weighted_error = error * directional_weight * mask[..., None]
+        return masked_weighted_error.mean()
 
 class TrackLoss(nn.Module):
-    def forward(
-        self, pred: torch.Tensor, target: torch.Tensor, mask: torch.Tensor
-    ) -> torch.Tensor:
+   def forward(self, pred, target) -> torch.Tensor:
         """
-        Weighted mean squared error loss emphasizing longitudinal errors
-
         Args:
-            pred: tensor (B, n_track, 2) predicted future positions
-            target: tensor (B, n_track, 2) ground truth future positions
-        Returns:
-            tensor, scalar loss
+            pred, target: (B, 10, 2)
         """
-        error = (pred - target).abs()  # (b, n, 2)
 
-        return error
+        # Split left/right boundaries
+        n_points = pred.size(1) // 2
+        left_pred, right_pred = pred[:, :n_points], pred[:, n_points:]
+        left_target, right_target = target[:, :n_points], target[:, n_points:]
+        
+        # Simple L2 loss for each boundary
+        boundary_loss = (left_pred - left_target).pow(2).mean() + \
+                        (right_pred - right_target).pow(2).mean()
+        
+        return boundary_loss
 
 
 """ AUTOENCODER
@@ -275,11 +267,13 @@ class CNNPlanner(torch.nn.Module):
     def __init__(
         self,
         n_waypoints: int = 3,
+        n_track: int = 10,
         dropout_rate: float = 0.2,
     ):
         super().__init__()
 
         self.n_waypoints = n_waypoints
+        self.n_track = n_track
 
         self.register_buffer(
             "input_mean", torch.as_tensor(INPUT_MEAN), persistent=False
@@ -304,48 +298,58 @@ class CNNPlanner(torch.nn.Module):
             in_dim, out_dim, stride=2
         )  # -> (64, H/8, W/8)
 
-        in_dim, out_dim = out_dim, 128
+        in_dim, out_dim = out_dim, 96
         self.encoder_block4 = ResidualCNNBlock(
             in_dim, out_dim, stride=2
-        )  # -> (128, H/16, W/16)
+        )  # -> (96, H/16, W/16)
+
+        in_dim, out_dim = out_dim, 192
+        self.encoder_block5 = ResidualCNNBlock(
+            in_dim, out_dim, stride=2
+        )  # -> (192, H/32, W/32)
 
         # BOTTLENECK: use ASPP for better feature extraction
-        self.bottle_neck = ASPP(128, 128)
+        self.bottle_neck = ASPP(192, 192)
 
         # DECODER:
-        in_dim, out_dim = out_dim, 64
+        in_dim, out_dim = out_dim, 96
         self.decoder_block1 = ResidualCNNBlock(
+            in_dim, out_dim, stride=2, up_sampling=True
+        )  #  -> (96, H/16, W/16)
+
+        in_dim, out_dim = out_dim, 64
+        self.decoder_block2 = ResidualCNNBlock(
             in_dim, out_dim, stride=2, up_sampling=True
         )  #  -> (64, H/8, W/8)
 
         in_dim, out_dim = out_dim, 32
-        self.decoder_block2 = ResidualCNNBlock(
+        self.decoder_block3 = ResidualCNNBlock(
             in_dim, out_dim, stride=2, up_sampling=True
         )  #  -> (32, H/4, W/4)
 
         in_dim, out_dim = out_dim, 16
-        self.decoder_block3 = ResidualCNNBlock(
+        self.decoder_block4 = ResidualCNNBlock(
             in_dim, out_dim, stride=2, up_sampling=True
         )  #  -> (16, H/2, W/2)
 
         in_dim, out_dim = out_dim, 16
-        self.decoder_block4 = ResidualCNNBlock(
+        self.decoder_block5 = ResidualCNNBlock(
             in_dim, out_dim, stride=2, up_sampling=True
         )  #  -> (16, H, W)
 
         # FINAL LAYERS
-        self.global_pool = nn.Sequential(
-            nn.AdaptiveAvgPool2d(1), nn.Dropout(dropout_rate=dropout_rate), nn.Flatten()
+        # predicting track
+        in_dim, out_dim = out_dim, n_track * 4
+        self.track_head = nn.Sequential(
+            nn.Conv2d(in_dim, out_dim, kernel_size=3, padding=1),  # -> (B, 40, H, W)
+            nn.AdaptiveAvgPool2d(1),
+            nn.Flatten(),
+            nn.Dropout(dropout_rate),  # (B, 40)
         )
 
         # waypoints head
-        in_dim, out_dim = out_dim, n_waypoints
-        self.longitudinal_head = MLPBlock(in_dim, out_dim)
-        self.lateral_head = MLPBlock(in_dim, out_dim)
-
-        # track_left, track_right
-        self.left_head = MLPBlock(in_dim, 20)
-        self.right_head = MLPBlock(in_dim, 20)
+        in_dim, out_dim = out_dim, n_waypoints * 2
+        self.waypoint_head = MLPBlock(in_dim, out_dim)  # (B, 6)
 
     def forward(self, image: torch.Tensor, **kwargs) -> torch.Tensor:
         """
@@ -355,6 +359,7 @@ class CNNPlanner(torch.nn.Module):
         Returns:
             torch.FloatTensor: future waypoints with shape (b, n, 2)
         """
+        batch_size = image.size(0)
         x = image
         x = (x - self.input_mean[None, :, None, None]) / self.input_std[
             None, :, None, None
@@ -364,26 +369,26 @@ class CNNPlanner(torch.nn.Module):
         enc1 = self.encoder_block1(x)  # (16, H/2, W/2)
         enc2 = self.encoder_block2(enc1)  # (32, H/4, W/4)
         enc3 = self.encoder_block3(enc2)  # (64, H//8, H/8)
-        enc4 = self.encoder_block4(enc3)  # (128, H/16, H/16)
+        enc4 = self.encoder_block4(enc3)  # (96, H/16, H/16)
+        enc5 = self.encoder_block5(enc4)  # (192, H/32, H/32)
 
-        features = self.bottle_neck(enc4)  # features extraction
+        features = self.bottle_neck(enc5)  # features extraction
 
-        dec1 = self.decoder_block1(features)  # (64, H/8, H/8)
-        dec1 += enc3  # residual
-        dec2 = self.decoder_block2(dec1)  # (32, H/4, H/4)
-        dec2 += enc2  # residual
-        dec3 = self.decoder_block3(dec2)  # (16, H/2, H/2)
-        dec3 = dec3 + enc1  # residual
-        dec4 = self.decoder_block4(dec3)  # (16, H, W)
+        dec1 = self.decoder_block1(features) + enc4  # (96, H/16, H/16)
+        dec2 = self.decoder_block2(dec1) + enc3  # (64, H/8, H/8)
+        dec3 = self.decoder_block3(dec2) + enc2  # (32, H/4, H/4)
+        dec4 = self.decoder_block4(dec3) + enc1  # (16, H/2, H/2)
+        dec5 = self.decoder_block5(dec4)  # (16, H, W)
 
-        y_pool = self.global_pool(dec4)  # (16,)
+        # Predict track
+        y_track = self.track_head(dec5)
+        if self.training:
+            self.pred_track = y_track.view(batch_size, -1, 2)
 
-        # MLP branches
-        y_longtitude = self.longitudinal_head(y_pool)  # (3,)
-        y_latitude = self.lateral_head(y_pool)  # (3,)
-        y = torch.stack([y_longtitude, y_latitude], dim=-1)
+        # Predict waypoints
+        y_waypoints = self.waypoint_head(y_track).view(batch_size, -1, 2)
 
-        return y
+        return y_waypoints
 
     def predict(self, image: torch.Tensor) -> torch.Tensor:
         """
@@ -493,6 +498,12 @@ def calculate_model_size_mb(model: torch.nn.Module) -> float:
     return sum(p.numel() for p in model.parameters()) * 4 / 1024 / 1024
 
 
+def cal_track_center(
+    track_left: torch.Tensor, track_right: torch.Tensor
+) -> torch.Tensor:
+    return (track_left + track_right) / 2
+
+
 def normalize_track_boundaries(
     track_left: torch.Tensor, track_right: torch.Tensor
 ) -> Tuple[torch.Tensor, torch.Tensor]:
@@ -515,7 +526,7 @@ def normalize_track_boundaries(
     assert track_left.size(-1) == 2, "Last dimension must be 2 for (x,y) coordinates"
 
     # Calculate center line
-    track_center = (track_left + track_right) / 2
+    track_center = cal_track_center(track_left, track_right)
     track_width = (track_right - track_left).norm(dim=-1, keepdim=True)
 
     # Normalize boundaries relative to center
