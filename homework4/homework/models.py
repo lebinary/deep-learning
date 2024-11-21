@@ -33,7 +33,7 @@ class WaypointLoss(nn.Module):
         """
 
         # L2 loss for smoother gradients
-        error = (pred - target).pow(2)
+        error = (pred - target).abs()
 
         # Directional weighting
         directional_weight = torch.tensor(
@@ -56,8 +56,8 @@ class TrackLoss(nn.Module):
         left_target, right_target = target[:, :n_points], target[:, n_points:]
         
         # Simple L2 loss for each boundary
-        boundary_loss = (left_pred - left_target).pow(2).mean() + \
-                        (right_pred - right_target).pow(2).mean()
+        boundary_loss = (left_pred - left_target).abs().mean() + \
+                        (right_pred - right_target).abs().mean()
         
         return boundary_loss
 
