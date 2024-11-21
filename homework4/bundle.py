@@ -2,6 +2,7 @@ import argparse
 import zipfile
 from pathlib import Path
 
+BLACKLIST_DIRS = ["cnn_planner", "transformer_planner", "mlp_planner"]
 BLACKLIST = ["__pycache__", ".pyc", ".ipynb"]
 MAXSIZE_MB = 40
 
@@ -17,6 +18,8 @@ def bundle(homework_dir: str, utid: str):
     files = []
 
     for f in homework_dir.rglob("*"):
+        if any(d in f.parts for d in BLACKLIST_DIRS):
+            continue
         if all(b not in str(f) for b in BLACKLIST):
             files.append(f)
 
